@@ -1,0 +1,87 @@
+% --- Setup paths (make sure you've run setpathsbehaviour already) ---
+setpathsbehaviour;  % creates RawDataRoot, ExtractedDataRoot, SaveHere in base
+addpath('D:\Extras\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only') % Adds the path to the VT extraction function
+% check with which Nlx2MatVT
+% Choose the animal and session you want to extract (easy to nest in a
+% loop later)
+animalName  = 'B5';
+sessionName = 'mouseB5_CNO_091412_day1';
+% Build paths
+sessionDir = fullfile(RawDataRoot, animalName, sessionName, 'raw');
+nvtFile    = fullfile(sessionDir, 'VT1.nvt');
+if ~exist(nvtFile,'file')
+    error('VT1.nvt not found at %s', nvtFile);
+end
+
+% --- Extract from VT file ---
+% Nlx2MatVT imports data from Neuralynx NVT files to Matlab variables.
+% The output variables must match the field selection flags.
+% The header is an additional output, requested by the ExtractHeader flag.
+
+% Corrected call to Nlx2MatVT
+[Timestamps, X, Y, Angles, Targets, Points, Header] = Nlx2MatVT(nvtFile, [1 1 1 1 1 1], 1, 1, [] );
+
+% Convert timestamps to seconds
+t_s = double(Timestamps) * 1e-6; % Corrected variable name from 'ts' to 'Timestamps'
+
+% --- Use ExtractPositionFromTargets for more robust data cleaning ---
+% The provided documentation recommends breaking up the 'Targets' matrix to
+% prevent Matlab from running out of memory or taking too long.
+% We will process the data in smaller chunks (e.g., 1000 targets at a time).
+
+chunkSize = 1000;
+numRecords = size(Targets, 2);
+valid_targets = zeros(1, numRecords); % Pre-allocate array for efficiency
+
+% Loop through the data in chunks
+for i = 1:chunkSize:numRecords
+    endIndex = i + chunkSize - 1;
+    if endIndex > numRecords
+        endIndex = numRecords;
+    end
+    
+    currentTargets = Targets(:, i:endIndex);
+    
+    % Call the ExtractPositionFromTargets function on the current chunk
+    [~, ~, ~, valid_targets_chunk] = ExtractPositionFromTargets(currentTargets);
+    
+    % Store the results in the pre-allocated array
+    valid_targets(i:endIndex) = valid_targets_chunk;
+end
+
+% A valid record is one that has at least one valid target.
+valid_idx = (valid_targets > 0);
+
+% Now filter all of your data using this new, more robust index.
+X_filtered = X(valid_idx);
+Y_filtered = Y(valid_idx);
+t_s_filtered = t_s(valid_idx);
+
+% Replace dropouts in the filtered data with NaN.
+X_filtered(X_filtered==0) = NaN;
+Y_filtered(Y_filtered==0) = NaN;
+
+
+% Build struct
+position = struct();
+position.time_s    = t_s_filtered;
+position.x_px   = X_filtered(:);
+position.y_px   = Y_filtered(:);
+position.subject = animalName;
+position.session= sessionName;
+
+% --- Save in SaveHere ---
+saveDir = fullfile(SaveHere, 'PositionExtraction', animalName, sessionName);
+if ~exist(saveDir,'dir'), mkdir(saveDir); end
+save(fullfile(saveDir,'position_extracted.mat'),'position','-v7.3');
+fprintf('✔ Saved position data to %s\n', fullfile(saveDir,'position_extracted.mat'));
+
+% --- Quick sanity plot ---
+figure;
+plot(position.x_px, position.y_px, '.','MarkerSize',1);
+axis equal; set(gca,'YDir','reverse');
+xlabel('x (px)'); ylabel('y (px)');
+
+% Use strrep to replace underscores with escaped underscores for correct plotting
+displaySessionName = strrep(sessionName, '_', '\_');
+title(sprintf('%s - %s', animalName, displaySessionName));
