@@ -1,1 +1,56 @@
+% --- Setup paths (make sure you've run setpathsbehaviour already) ---
+setpathsbehaviour;  % creates RawDataRoot, ExtractedDataRoot, SaveHere in base (custom made function for my workflow comment this out if you want to reproduce!)
+addpath('D:\Extras\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only') % Adds the path to the VT extraction function
+% check with 'which Nlx2MatVT'
 
+% Choose the animal and session to extract (easy to nest in a loop later)
+animalName  = 'B5';
+sessionName = 'mouseB5_CNO_091412_day1';
+
+% Build paths
+sessionDir = fullfile(RawDataRoot, animalName, sessionName, 'raw');
+nvtFile    = fullfile(sessionDir, 'VT1.nvt');
+
+if ~exist(nvtFile,'file')
+    error('VT1.nvt not found at %s', nvtFile);
+end
+
+% --- Extract from VT file ---
+% NLX2MATVT Imports data from Neuralynx NVT files to Matlab variables.
+%
+%   [TimeStamps, ExtractedX, ExtractedY, ExtractedAngle, Targets, Points] =
+%                      Nlx2MatVT(  Filename, FieldSelection, ExtractHeader,
+%                                 ExtractMode, ModeArray );
+
+[Timestamps, x, y, Angles, Targets, Points, Header] =  Nlx2MatVT(nvtFile, [1 1 1 1 1 1], 1, 1, [] );
+
+% Convert timestamps to seconds
+t_s = double(Timestamps) * 1e-6;
+
+% Replace 0 with NaN (dropouts)
+x(x==0) = NaN;
+y(y==0) = NaN;
+
+
+% Build struct
+position = struct();
+position.time_s    = t_s(:);
+position.x_px   = x(:);
+position.y_px   = y(:);
+position.subject = animalName;
+position.session= sessionName;
+
+% --- Save in SaveHere ---
+saveDir = fullfile(SaveHere, 'PositionExtraction', animalName, sessionName);
+if ~exist(saveDir,'dir'), mkdir(saveDir); end
+save(fullfile(saveDir,'position_extracted.mat'),'position','-v7.3');
+
+fprintf('✔ Saved position data to %s\n', fullfile(saveDir,'position_extracted.mat'));
+
+% --- Quick sanity plot ---
+figure;
+plot(position.x_px, position.y_px, '.','MarkerSize',1);
+axis equal; set(gca,'YDir','reverse');
+xlabel('x (px)'); ylabel('y (px)');
+displaySessionName = strrep(sessionName, '_', '\_');
+title(sprintf('%s - %s', animalName, displaySessionName));
