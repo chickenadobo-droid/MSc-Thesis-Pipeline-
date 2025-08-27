@@ -100,7 +100,7 @@
 %     hold(ax, 'off');
 % 
 %     x_rect = x_rect(1:end-1); % remove the last point to not close the polygon
-%     y_rect = y_rect(1:end-1); % Fixed: was y_rect(y1) which was incorrect
+%     y_rect = y_rect(1:end-1); 
 % end
 % 
 % % This function fits a circle to multiple user-selected points.
@@ -368,7 +368,7 @@
 %             end
 %         end
 % 
-%         % FIXED: Properly calculate track indices to exclude sleepbox and inner area
+%         % Calculate track indices to exclude sleepbox and inner area
 %         in_track_idx = inpolygon(X, Y, track_outer_x_poly, track_outer_y_poly) & ...
 %                        ~inpolygon(X, Y, track_inner_x_poly, track_inner_y_poly) & ...
 %                        ~in_sleep_box_idx;
@@ -412,7 +412,7 @@
 % X_interp_sleep = interp1(t_to_interp_sleep(~isnan(X_to_interp_sleep)), X_to_interp_sleep(~isnan(X_to_interp_sleep)), t_s, 'linear');
 % Y_interp_sleep = interp1(t_to_interp_sleep(~isnan(Y_to_interp_sleep)), Y_to_interp_sleep(~isnan(Y_to_interp_sleep)), t_s, 'linear');
 % 
-% % FIXED: Re-filter the interpolated data more strictly to ensure no stray points
+% Re-filter the interpolated data more strictly to ensure no stray points
 % X_interp_track_final = X_interp_track;
 % Y_interp_track_final = Y_interp_track;
 % X_interp_sleep_final = X_interp_sleep;
