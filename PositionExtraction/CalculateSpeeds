@@ -1,3 +1,35 @@
+%% This code builds the following struct:
+% Position (struct) complete for Animal B5 Day 1
+% time_s: a vector of time stamps in seconds.
+% x_px_track: a vector of x-coordinates (in pixels) specifically for the track segment.
+% y_px_track: a vector of y-coordinates (in pixels) specifically for the track segment.
+% x_px_sleep: a vector of x-coordinates (in pixels) specifically for the sleep segment.
+% y_px_sleep: a vector of y-coordinates (in pixels) specifically for the sleep segment.
+% subject: a string indicating the subject identifier.
+% session: a string representing the session name.
+% ArenaType: a string detailing the type of arena used.
+% is_track: a logical vector where true indicates a time point on the track.
+% is_sleep: a logical vector where true indicates a time point in the sleep area.
+% coords (struct): a nested structure containing arena coordinate data.
+%   -  track_outer_poly: a matrix of coordinates defining the outer polygon of the track.
+%   -  track_inner_poly: a matrix of coordinates defining the inner polygon of the track.
+%   -  sleep_poly: a matrix of coordinates defining the sleep polygon (empty in this case).
+%   -  sleep_circle: a vector representing the sleep area as a circle (center x, center y, radius).
+% linear_track_length_px: a scalar value for the linear length of the track in pixels.
+%   -  track_centerline_x: a vector of x-coordinates for the track's centerline.
+%   -  track_centerline_y: a vector of y-coordinates for the track's centerline.
+% cm_to_px_ratio: a scalar conversion factor from centimeters to pixels.
+% x_px: a vector of all x-coordinates in pixels.
+% y_px: a vector of all y-coordinates in pixels.
+% v_px: a vector of all velocities in pixels per second.
+% v_track_px_z: a vector of z-scored velocities in pixels per second, specifically for the track.
+% v_sleep_px_z: a vector of z-scored velocities in pixels per second, specifically for the sleep area.
+% x_cm: a vector of all x-coordinates converted to centimeters.
+% y_cm: a vector of all y-coordinates converted to centimeters.
+% v_cm: a vector of all velocities in centimeters per second.
+% v_cm_track_z: a vector of z-scored velocities in centimeters per second, specifically for the track.
+% v_cm_sleep_z: a vector of z-scored velocities in centimeters per second, specifically for the sleep area (only for Mixed (Track + Sleepbox) sessions with reliable cm to pixel ratios)
+
 %% Assume This Previous section was already run in the previous step 
 % % --- User-defined interactive functions ---
 % % This function allows you to manually select a polygon on a plot.
