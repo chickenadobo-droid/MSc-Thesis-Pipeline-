@@ -1,0 +1,752 @@
+%% Assume This Previous section was already run in the previous step 
+% % --- User-defined interactive functions ---
+% % This function allows you to manually select a polygon on a plot.
+% % This is a powerful way to define specific regions of interest (e.g., track or sleep box).
+% function [x_poly, y_poly] = get_polygon_from_plot(ax, title_str)
+%     % Set the active axes for plotting
+%     axes(ax);
+% 
+%     % Clear any previous lines
+%     hold(ax, 'on');
+% 
+%     % Title the plot to guide the user
+%     title(ax, title_str);
+% 
+%     disp('Click on the vertices of the polygon to define the area.');
+%     disp('For best results, select points in a clockwise order.');
+%     disp('Press Enter after the last point to finish.');
+% 
+%     % Get points from user clicks
+%     [x_poly, y_poly] = ginput;
+% 
+%     % Plot the polygon to confirm selection
+%     plot(ax, [x_poly; x_poly(1)], [y_poly; y_poly(1)], 'r-', 'LineWidth', 2);
+% 
+%     % Re-enable the hold state
+%     hold(ax, 'off');
+% end
+% 
+% % This new function is for defining a circular region
+% function [centerX, centerY, radius] = get_circle_from_plot(ax, title_str)
+%     axes(ax);
+%     hold(ax, 'on');
+%     title(ax, title_str);
+% 
+%     disp('Click on the CENTER of the circle.');
+%     [centerX, centerY] = ginput(1);
+%     plot(ax, centerX, centerY, 'ro', 'MarkerSize', 10);
+% 
+%     disp('Click on a point on the CIRCUMFERENCE to define the radius.');
+%     [pointX, pointY] = ginput(1);
+% 
+%     % Calculate the radius (Fixed variable name from Y to pointY)
+%     radius = sqrt((pointX - centerX).^2 + (pointY - centerY).^2);
+% 
+%     % Plot a circle for visualization
+%     theta = 0:0.01:2*pi;
+%     x_circle = centerX + radius * cos(theta);
+%     y_circle = centerY + radius * sin(theta);
+%     plot(ax, x_circle, y_circle, 'r-', 'LineWidth', 2);
+% 
+%     hold(ax, 'off');
+% end
+% 
+% % This new function lets you draw a path with your mouse clicks
+% function [x_path, y_path] = draw_path_on_plot(ax, title_str)
+%     axes(ax);
+%     hold(ax, 'on');
+%     title(ax, title_str);
+%     disp('Click to draw the path. Press any key to finish.');
+% 
+%     % Use ginput with a large number and a try-catch to allow key press to end
+%     try
+%         [x_path, y_path] = ginput(inf);
+%     catch
+%         % This will catch the error when a key is pressed to stop ginput
+%     end
+% 
+%     % Plot the path as a line
+%     plot(ax, x_path, y_path, 'r-', 'LineWidth', 2);
+% 
+%     % Get confirmation from the user
+%     choice = input('Are you happy with the path? (y/n): ', 's');
+%     if lower(choice) ~= 'y'
+%         disp('Re-drawing path...');
+%         [x_path, y_path] = draw_path_on_plot(ax, title_str);
+%     end
+% end
+% 
+% % New function to select a rectangular area
+% function [x_rect, y_rect] = get_square_from_plot(ax, title_str)
+%     axes(ax);
+%     hold(ax, 'on');
+%     title(ax, title_str);
+% 
+%     disp('Click the top-left and then the bottom-right corners of the rectangle.');
+%     [x_corners, y_corners] = ginput(2);
+% 
+%     x1 = x_corners(1);
+%     y1 = y_corners(1);
+%     x2 = x_corners(2);
+%     y2 = y_corners(2);
+% 
+%     % Define the vertices of the rectangle
+%     x_rect = [x1, x1, x2, x2, x1];
+%     y_rect = [y1, y2, y2, y1, y1];
+% 
+%     % Plot the rectangle to confirm selection
+%     plot(ax, x_rect, y_rect, 'r-', 'LineWidth', 2);
+% 
+%     hold(ax, 'off');
+% 
+%     x_rect = x_rect(1:end-1); % remove the last point to not close the polygon
+%     y_rect = y_rect(1:end-1); % Fixed: was y_rect(y1) which was incorrect
+% end
+% 
+% % This function fits a circle to multiple user-selected points.
+% % It calculates the best-fit center and radius.
+% function [centerX, centerY, radius] = get_circle_from_perimeter(ax, title_str)
+%     axes(ax);
+%     hold(ax, 'on');
+%     title(ax, title_str);
+% 
+%     disp('Click at least 3 points on the circumference of the circle.');
+%     disp('Press Enter after the last point to finish.');
+%     [x_points, y_points] = ginput;
+% 
+%     if length(x_points) < 3
+%         error('At least 3 points are required to define a circle.');
+%     end
+% 
+%     % Use a least squares fit to find the best circle
+%     A = [x_points, y_points, ones(size(x_points))];
+%     b = -(x_points.^2 + y_points.^2);
+% 
+%     % Solve for the coefficients
+%     coeffs = A \ b;
+% 
+%     % Extract center and radius
+%     centerX = -coeffs(1) / 2;
+%     centerY = -coeffs(2) / 2;
+%     radius = sqrt((coeffs(1)^2 + coeffs(2)^2) / 4 - coeffs(3));
+% 
+%     % Plot the fitted circle for visualization
+%     theta = 0:0.01:2*pi;
+%     x_circle = centerX + radius * cos(theta);
+%     y_circle = centerY + radius * sin(theta);
+%     plot(ax, x_circle, y_circle, 'g-', 'LineWidth', 2);
+% 
+%     hold(ax, 'off');
+% end
+% 
+% % Function to calculate the centerline of a track and its linear length
+% function [centerline_x, centerline_y, linear_track_length_px, cm_to_px_ratio] = calculate_track_centerline(track_outer_poly, track_inner_poly, ax, real_track_length_cm)
+%     % This function calculates the centerline between inner and outer track boundaries
+%     % and computes the linear track length in pixels
+% 
+%     if isempty(track_outer_poly) || isempty(track_inner_poly)
+%         centerline_x = [];
+%         centerline_y = [];
+%         linear_track_length_px = NaN;
+%         cm_to_px_ratio = NaN;
+%         return;
+%     end
+% 
+%     % Method 1: User-defined centerline (recommended for irregular U-tracks)
+%     axes(ax);
+%     hold(ax, 'on');
+% 
+%     % Plot the track boundaries for reference
+%     plot(ax, [track_outer_poly(:,1); track_outer_poly(1,1)], [track_outer_poly(:,2); track_outer_poly(1,2)], 'k-', 'LineWidth', 2);
+%     plot(ax, [track_inner_poly(:,1); track_inner_poly(1,1)], [track_inner_poly(:,2); track_inner_poly(1,2)], 'k-', 'LineWidth', 2);
+% 
+%     title(ax, 'Draw the CENTERLINE of the track (start to end of track)');
+%     disp('Click points along the CENTER of the track to define the running path.');
+%     disp('Start from one end and work your way to the other end.');
+%     disp('Press Enter after the last point to finish.');
+% 
+%     [centerline_x, centerline_y] = ginput;
+% 
+%     % Plot the centerline for confirmation
+%     plot(ax, centerline_x, centerline_y, 'g-', 'LineWidth', 3, 'Marker', 'o', 'MarkerSize', 5);
+%     plot(ax, centerline_x, centerline_y, 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'g');
+% 
+%     hold(ax, 'off');
+% 
+%     % Calculate the linear length of the centerline
+%     if length(centerline_x) > 1
+%         distances = sqrt(diff(centerline_x).^2 + diff(centerline_y).^2);
+%         linear_track_length_px = sum(distances);
+% 
+%         % Calculate cm to pixel ratio
+%         if nargin > 3 && ~isempty(real_track_length_cm) && real_track_length_cm > 0
+%             cm_to_px_ratio = real_track_length_cm / linear_track_length_px;
+%         else
+%             cm_to_px_ratio = NaN;
+%         end
+% 
+%         fprintf('Track centerline length: %.1f pixels\n', linear_track_length_px);
+%         if ~isnan(cm_to_px_ratio)
+%             fprintf('Conversion ratio: %.4f cm/pixel\n', cm_to_px_ratio);
+%         end
+%     else
+%         linear_track_length_px = NaN;
+%         cm_to_px_ratio = NaN;
+%     end
+% end
+% 
+% % New function to remove spatial outliers by defining a speed threshold
+% function [x_out, y_out, t_out] = prune_outlier_points(x_in, y_in, t_in)
+% 
+%     % Calculate the distance between consecutive points
+%     dx = diff(x_in);
+%     dy = diff(y_in);
+%     dist = sqrt(dx.^2 + dy.^2);
+% 
+%     % Calculate the time difference and speed
+%     dt = diff(t_in);
+%     speed = dist ./ dt;
+% 
+%     % Use a robust statistical method (Median Absolute Deviation) to find the threshold.
+%     % This is better than mean/SD as it is not affected by the outliers themselves.
+%     median_speed = median(speed, 'omitnan');
+%     mad_speed = median(abs(speed - median_speed), 'omitnan');
+% 
+%     % Set the threshold to 5 times the MAD. This can be adjusted.
+%     threshold = median_speed + 5 * mad_speed;
+% 
+%     % Find indices of points that exceed the threshold
+%     outlier_idx = find(speed > threshold);
+% 
+%     % Create a copy of the input data
+%     x_out = x_in;
+%     y_out = y_in;
+%     t_out = t_in;
+% 
+%     % Set outlier points to NaN
+%     x_out(outlier_idx + 1) = NaN;
+%     y_out(outlier_idx + 1) = NaN;
+% end
+% 
+% 
+% % --- Main script for data processing ---
+% 
+% % --- Setup paths (make sure you've run setpathsbehaviour already) ---
+% setpathsbehaviour;  % creates RawDataRoot, ExtractedDataRoot, SaveHere in base
+% addpath('D:\Extras\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only') % Adds the path to the VT extraction function
+% % check with which Nlx2MatVT
+% 
+% % Choose the animal and session to extract (easy to nest in a loop later)
+% animalName  = 'B5';
+% sessionName = 'mouseB5_CNO_091412_day1';
+% 
+% % Build paths
+% sessionDir = fullfile(RawDataRoot, animalName, sessionName, 'raw');
+% nvtFile    = fullfile(sessionDir, 'VT1.nvt');
+% if ~exist(nvtFile,'file')
+%     error('VT1.nvt not found at %s', nvtFile);
+% end
+% 
+% % --- Extract from VT file ---
+% % Nlx2MatVT imports data from Neuralynx NVT files to Matlab variables.
+% % The output variables must match the field selection flags.
+% % The header is an additional output, requested by the ExtractHeader flag.
+% [Timestamps, X, Y, Angles, Targets, Points, Header] = Nlx2MatVT(nvtFile, [1 1 1 1 1 1], 1, 1, [] );
+% 
+% % Convert timestamps to seconds
+% t_s = double(Timestamps) * 1e-6; % Corrected variable name from 'ts' to 'Timestamps'
+% 
+% % Replace 0 with NaN (dropouts)
+% X(X==0) = NaN;
+% Y(Y==0) = NaN;
+% 
+% % --- Preliminary plot to inspect the arena type ---
+% figure('Name', 'Session Data');
+% hAx = gca;
+% plot(hAx, X, Y, '.', 'MarkerSize', 1);
+% axis(hAx, 'equal');
+% set(hAx, 'YDir', 'reverse');
+% xlabel(hAx, 'x (px)');
+% ylabel(hAx, 'y (px)');
+% 
+% % Correctly format the title with escaped underscores
+% displaySessionName = strrep(sessionName, '_', '\_');
+% title(hAx, sprintf('%s - %s', animalName, displaySessionName));
+% 
+% % --- Define the arena type manually ---
+% % This is a crucial step for setting up the correct filtering logic.
+% fprintf('Please enter the arena type for this session.\n');
+% fprintf('Valid options are: "OpenField", "Sleepbox", "Track", "Mixed (Sleepbox + Track)"\n');
+% ArenaType = input('Enter Arena Type: ', 's');
+% 
+% % Initialize logical indices and polygon/circle coordinates
+% in_track_idx = false(size(X));
+% in_sleep_box_idx = false(size(X));
+% track_outer_poly_coords = [];
+% track_inner_poly_coords = [];
+% sleep_poly_coords = [];
+% sleep_circle_coords = [];
+% linear_track_length_px = NaN;
+% track_centerline_x = [];
+% track_centerline_y = [];
+% cm_to_px_ratio = NaN;
+% 
+% % Use a switch statement to handle different arena types
+% switch ArenaType
+%     case 'OpenField'
+%         [open_field_x_poly, open_field_y_poly] = get_polygon_from_plot(hAx, 'Select OPEN FIELD Perimeter');
+%         if ~isempty(open_field_x_poly)
+%             in_track_idx = inpolygon(X, Y, open_field_x_poly, open_field_y_poly);
+%             track_outer_poly_coords = [open_field_x_poly, open_field_y_poly];
+%         end
+% 
+%     case 'Sleepbox'
+%         sleepbox_shape = input('Is the sleepbox a circle or a polygon? (c/p): ', 's');
+%         if lower(sleepbox_shape) == 'c'
+%             [centerX, centerY, radius] = get_circle_from_perimeter(hAx, 'Define CIRCULAR SLEEPBOX by clicking points on the perimeter');
+%             in_sleep_box_idx = (X - centerX).^2 + (Y - centerY).^2 <= radius^2;
+%             sleep_circle_coords = [centerX, centerY, radius];
+%         else
+%             [sleep_x_poly, sleep_y_poly] = get_polygon_from_plot(hAx, 'Select SLEEPBOX Perimeter ONLY');
+%             if ~isempty(sleep_x_poly)
+%                 in_sleep_box_idx = inpolygon(X, Y, sleep_x_poly, sleep_y_poly);
+%                 sleep_poly_coords = [sleep_x_poly, sleep_y_poly];
+%             end
+%         end
+% 
+%     case 'Track'
+%         [track_outer_x_poly, track_outer_y_poly] = get_polygon_from_plot(hAx, 'Select OUTER TRACK Perimeter ONLY');
+%         if ~isempty(track_outer_x_poly)
+%             % Check if the track has a central 'hole'
+%             is_holed_track = input('Does this track have a central hole? (y/n): ', 's');
+%             if lower(is_holed_track) == 'y'
+%                 [track_inner_x_poly, track_inner_y_poly] = get_polygon_from_plot(hAx, 'Select INNER TRACK Perimeter ONLY');
+%                 in_track_idx = inpolygon(X, Y, track_outer_x_poly, track_outer_y_poly) & ~inpolygon(X, Y, track_inner_x_poly, track_inner_y_poly);
+%                 track_inner_poly_coords = [track_inner_x_poly, track_inner_y_poly];
+%             else
+%                 in_track_idx = inpolygon(X, Y, track_outer_x_poly, track_outer_y_poly);
+%             end
+%             track_outer_poly_coords = [track_outer_x_poly, track_outer_y_poly];
+% 
+%             % Calculate linear length of the track polygon
+%             linear_track_length_px = sum(sqrt(diff(track_outer_x_poly).^2 + diff(track_outer_y_poly).^2));
+% 
+%             % For tracks with holes, also calculate centerline if user wants accurate length
+%             if ~isempty(track_inner_poly_coords)
+%                 calculate_centerline = input('Calculate accurate centerline length? (y/n): ', 's');
+%                 if lower(calculate_centerline) == 'y'
+%                     real_track_length_cm = input('Enter the real track length in cm (e.g., 100): ');
+%                     [track_centerline_x, track_centerline_y, linear_track_length_px, cm_to_px_ratio] = ...
+%                         calculate_track_centerline([track_outer_x_poly, track_outer_y_poly], ...
+%                                                  track_inner_poly_coords, ...
+%                                                  hAx, real_track_length_cm);
+%                 end
+%             end
+%         end
+% 
+%     case 'Mixed (Sleepbox + Track)'
+%         [track_outer_x_poly, track_outer_y_poly] = get_polygon_from_plot(hAx, 'Select OUTER EXPERIMENTAL AREA (Track + Sleepbox)');
+%         track_outer_poly_coords = [track_outer_x_poly, track_outer_y_poly];
+%         if isempty(track_outer_x_poly)
+%             error('Experimental area polygon cannot be empty.');
+%         end
+% 
+%         % Get the inner perimeter for the U-shaped track
+%         [track_inner_x_poly, track_inner_y_poly] = get_polygon_from_plot(hAx, 'Select INNER TRACK Perimeter ONLY');
+%         track_inner_poly_coords = [track_inner_x_poly, track_inner_y_poly];
+% 
+%         sleepbox_shape = input('Is the sleepbox a circle or a polygon? (c/p): ', 's');
+%         if lower(sleepbox_shape) == 'c'
+%             [centerX, centerY, radius] = get_circle_from_perimeter(hAx, 'Define CIRCULAR SLEEPBOX by clicking points on the perimeter');
+%             in_sleep_box_idx = (X - centerX).^2 + (Y - centerY).^2 <= radius^2;
+%             sleep_circle_coords = [centerX, centerY, radius];
+%         else
+%             [sleep_x_poly, sleep_y_poly] = get_polygon_from_plot(hAx, 'Select SLEEPBOX Perimeter ONLY');
+%             if ~isempty(sleep_x_poly)
+%                 in_sleep_box_idx = inpolygon(X, Y, sleep_x_poly, sleep_y_poly);
+%                 sleep_poly_coords = [sleep_x_poly, sleep_y_poly];
+%             end
+%         end
+% 
+%         % FIXED: Properly calculate track indices to exclude sleepbox and inner area
+%         in_track_idx = inpolygon(X, Y, track_outer_x_poly, track_outer_y_poly) & ...
+%                        ~inpolygon(X, Y, track_inner_x_poly, track_inner_y_poly) & ...
+%                        ~in_sleep_box_idx;
+% 
+%         % Calculate the proper track centerline and length
+%         real_track_length_cm = input('Enter the real track length in cm (e.g., 100): ');
+%         [track_centerline_x, track_centerline_y, linear_track_length_px, cm_to_px_ratio] = ...
+%             calculate_track_centerline([track_outer_x_poly, track_outer_y_poly], ...
+%                                      [track_inner_x_poly, track_inner_y_poly], ...
+%                                      hAx, real_track_length_cm);
+% 
+%     otherwise
+%         error('Invalid ArenaType entered. Please run the script again with a valid input.');
+% end
+% 
+% valid_idx = in_track_idx | in_sleep_box_idx;
+% 
+% % --- Prune remaining outliers from the raw data before interpolation ---
+% [X_pruned, Y_pruned, t_pruned] = prune_outlier_points(X, Y, t_s);
+% 
+% % --- Filter data based on logical indices ---
+% % Create a copy of the pruned data to be used for the interpolation
+% X_to_interp_track = X_pruned;
+% Y_to_interp_track = Y_pruned;
+% t_to_interp_track = t_pruned;
+% X_to_interp_sleep = X_pruned;
+% Y_to_interp_sleep = Y_pruned;
+% t_to_interp_sleep = t_pruned;
+% 
+% % Apply the spatial filters to the pruned data
+% X_to_interp_track(~in_track_idx) = NaN;
+% Y_to_interp_track(~in_track_idx) = NaN;
+% X_to_interp_sleep(~in_sleep_box_idx) = NaN;
+% Y_to_interp_sleep(~in_sleep_box_idx) = NaN;
+% 
+% % --- Position smoothing and interpolation on filtered data ---
+% % Interpolate the track and sleepbox data separately
+% X_interp_track = interp1(t_to_interp_track(~isnan(X_to_interp_track)), X_to_interp_track(~isnan(X_to_interp_track)), t_s, 'linear');
+% Y_interp_track = interp1(t_to_interp_track(~isnan(Y_to_interp_track)), Y_to_interp_track(~isnan(Y_to_interp_track)), t_s, 'linear');
+% 
+% X_interp_sleep = interp1(t_to_interp_sleep(~isnan(X_to_interp_sleep)), X_to_interp_sleep(~isnan(X_to_interp_sleep)), t_s, 'linear');
+% Y_interp_sleep = interp1(t_to_interp_sleep(~isnan(Y_to_interp_sleep)), Y_to_interp_sleep(~isnan(Y_to_interp_sleep)), t_s, 'linear');
+% 
+% % FIXED: Re-filter the interpolated data more strictly to ensure no stray points
+% X_interp_track_final = X_interp_track;
+% Y_interp_track_final = Y_interp_track;
+% X_interp_sleep_final = X_interp_sleep;
+% Y_interp_sleep_final = Y_interp_sleep;
+% 
+% % For each interpolated point, re-check if it's still within the defined regions
+% for i = 1:length(X_interp_track)
+%     % Check track points
+%     if ~isnan(X_interp_track(i)) && ~isnan(Y_interp_track(i))
+%         % Re-calculate if this interpolated point is within the track region
+%         point_in_track = false;
+% 
+%         switch ArenaType
+%             case 'OpenField'
+%                 if ~isempty(track_outer_poly_coords)
+%                     point_in_track = inpolygon(X_interp_track(i), Y_interp_track(i), track_outer_poly_coords(:,1), track_outer_poly_coords(:,2));
+%                 end
+%             case 'Track'
+%                 if ~isempty(track_outer_poly_coords)
+%                     if ~isempty(track_inner_poly_coords)
+%                         point_in_track = inpolygon(X_interp_track(i), Y_interp_track(i), track_outer_poly_coords(:,1), track_outer_poly_coords(:,2)) & ...
+%                                        ~inpolygon(X_interp_track(i), Y_interp_track(i), track_inner_poly_coords(:,1), track_inner_poly_coords(:,2));
+%                     else
+%                         point_in_track = inpolygon(X_interp_track(i), Y_interp_track(i), track_outer_poly_coords(:,1), track_outer_poly_coords(:,2));
+%                     end
+%                 end
+%             case 'Mixed (Sleepbox + Track)'
+%                 if ~isempty(track_outer_poly_coords) && ~isempty(track_inner_poly_coords)
+%                     % Check if point is in sleepbox first
+%                     point_in_sleepbox = false;
+%                     if ~isempty(sleep_circle_coords)
+%                         point_in_sleepbox = (X_interp_track(i) - sleep_circle_coords(1))^2 + (Y_interp_track(i) - sleep_circle_coords(2))^2 <= sleep_circle_coords(3)^2;
+%                     elseif ~isempty(sleep_poly_coords)
+%                         point_in_sleepbox = inpolygon(X_interp_track(i), Y_interp_track(i), sleep_poly_coords(:,1), sleep_poly_coords(:,2));
+%                     end
+% 
+%                     % Point is in track if it's in outer area, not in inner area, and not in sleepbox
+%                     point_in_track = inpolygon(X_interp_track(i), Y_interp_track(i), track_outer_poly_coords(:,1), track_outer_poly_coords(:,2)) & ...
+%                                    ~inpolygon(X_interp_track(i), Y_interp_track(i), track_inner_poly_coords(:,1), track_inner_poly_coords(:,2)) & ...
+%                                    ~point_in_sleepbox;
+%                 end
+%         end
+% 
+%         if ~point_in_track
+%             X_interp_track_final(i) = NaN;
+%             Y_interp_track_final(i) = NaN;
+%         end
+%     end
+% 
+%     % Check sleepbox points
+%     if ~isnan(X_interp_sleep(i)) && ~isnan(Y_interp_sleep(i))
+%         point_in_sleepbox = false;
+% 
+%         if ~isempty(sleep_circle_coords)
+%             point_in_sleepbox = (X_interp_sleep(i) - sleep_circle_coords(1))^2 + (Y_interp_sleep(i) - sleep_circle_coords(2))^2 <= sleep_circle_coords(3)^2;
+%         elseif ~isempty(sleep_poly_coords)
+%             point_in_sleepbox = inpolygon(X_interp_sleep(i), Y_interp_sleep(i), sleep_poly_coords(:,1), sleep_poly_coords(:,2));
+%         end
+% 
+%         if ~point_in_sleepbox
+%             X_interp_sleep_final(i) = NaN;
+%             Y_interp_sleep_final(i) = NaN;
+%         end
+%     end
+% end
+% 
+% % Build final struct with cleaned and smoothed data
+% position = struct();
+% position.time_s = t_s(:);
+% position.x_px_track = X_interp_track_final(:);
+% position.y_px_track = Y_interp_track_final(:);
+% position.x_px_sleep = X_interp_sleep_final(:);
+% position.y_px_sleep = Y_interp_sleep_final(:);
+% position.x_px = nansum([position.x_px_track, position.x_px_sleep], 2);
+% position.y_px = nansum([position.y_px_track, position.y_px_sleep], 2);
+% position.subject = animalName;
+% position.session = sessionName;
+% position.ArenaType = ArenaType; % Store the ArenaType string
+% position.is_track = in_track_idx(:); % Store the logical indices for track vs sleep analysis
+% position.is_sleep = in_sleep_box_idx(:);
+% position.coords.track_outer_poly = track_outer_poly_coords;
+% position.coords.track_inner_poly = track_inner_poly_coords;
+% position.coords.sleep_poly = sleep_poly_coords;
+% position.coords.sleep_circle = sleep_circle_coords;
+% position.linear_track_length_px = linear_track_length_px;
+% position.track_centerline_x = track_centerline_x;
+% position.track_centerline_y = track_centerline_y;
+% position.cm_to_px_ratio = cm_to_px_ratio;
+% 
+% % --- Save in SaveHere ---
+% saveDir = fullfile(SaveHere, 'PositionExtraction', animalName, sessionName);
+% if ~exist(saveDir,'dir'), mkdir(saveDir); end
+% save(fullfile(saveDir,'position_extracted.mat'),'position','-v7.3');
+% fprintf('✔ Saved position data to %s\n', fullfile(saveDir,'position_extracted.mat'));
+% 
+% % --- Quick sanity plot of the FINAL cleaned data ---
+% figure;
+% hold on;
+% % Plot the track data in one color, with a larger MarkerSize
+% hTrack = plot(position.x_px_track, position.y_px_track, '.', 'Color', [0 0.447 0.741], 'MarkerSize', 5);
+% % Plot the sleep data in another color, with a larger MarkerSize
+% hSleep = plot(position.x_px_sleep, position.y_px_sleep, '.', 'Color', [0.85 0.325 0.098], 'MarkerSize', 5);
+% axis equal;
+% set(gca, 'YDir', 'reverse');
+% xlabel('x (px)');
+% ylabel('y (px)');
+% displaySessionName = strrep(position.session, '_', '\_');
+% title(sprintf('%s - %s (Cleaned and Interpolated)', position.subject, displaySessionName));
+% 
+% % Adjust legend based on the ArenaType
+% if strcmp(position.ArenaType, 'Mixed (Sleepbox + Track)')
+%     legend([hTrack, hSleep], 'Track', 'Sleepbox');
+% elseif strcmp(position.ArenaType, 'Sleepbox')
+%     legend(hSleep, 'Sleepbox');
+% elseif strcmp(position.ArenaType, 'Track') || strcmp(position.ArenaType, 'OpenField')
+%     legend(hTrack, 'Track');
+% end
+% hold off;
+% 
+% % --- Plot x and y position over time, with track and sleepbox data separated on the same timeline ---
+% figure('Position', [100, 100, 1200, 800]);
+% 
+% subplot(2,1,1);
+% hold on;
+% % Track X
+% hXTrack = plot(position.time_s(~isnan(position.x_px_track)), ...
+%                   position.x_px_track(~isnan(position.x_px_track)), ...
+%                   3, 'b', 'filled');   % 3 = SizeData
+% % Sleepbox X
+% hXSleep = plot (position.time_s(~isnan(position.x_px_sleep)), ...
+%                   position.x_px_sleep(~isnan(position.x_px_sleep)), ...
+%                   3, 'r', 'filled');
+% xlabel('Time (s)');
+% ylabel('X Position (px)');
+% title('X Position over Time');
+% legend([hXTrack, hXSleep], 'Track', 'Sleepbox', 'Location', 'best');
+% hold off;
+% 
+% subplot(2,1,2);
+% hold on;
+% % Track Y
+% hYTrack = scatter(position.time_s(~isnan(position.y_px_track)), ...
+%                   position.y_px_track(~isnan(position.y_px_track)), ...
+%                   3, 'b', 'filled');
+% % Sleepbox Y
+% hYSleep = scatter(position.time_s(~isnan(position.y_px_sleep)), ...
+%                   position.y_px_sleep(~isnan(position.y_px_sleep)), ...
+%                   3, 'r', 'filled');
+% xlabel('Time (s)');
+% ylabel('Y Position (px)');
+% title('Y Position over Time');
+% legend([hYTrack, hYSleep], 'Track', 'Sleepbox', 'Location', 'best');
+% hold off;
+% 
+% %% --- Density (time-occupancy) heatmap(s) depending on ArenaType ---
+% t = position.time_s(:);
+% dt = diff(t);
+% dt = [dt; median(dt, 'omitnan')];  % pad last
+% 
+% bin_size = 5;
+% 
+% % Get all available x/y coords to define bin range
+% x_all = [position.x_px_track; position.x_px_sleep];
+% y_all = [position.y_px_track; position.y_px_sleep];
+% x_min = floor(min(x_all, [], 'omitnan'));
+% x_max = ceil(max(x_all, [], 'omitnan'));
+% y_min = floor(min(y_all, [], 'omitnan'));
+% y_max = ceil(max(y_all, [], 'omitnan'));
+% 
+% x_edges = x_min:bin_size:x_max;
+% y_edges = y_min:bin_size:y_max;
+% 
+% % --------- Helper function ---------
+% function occ = compute_occupancy(x, y, weights, x_edges, y_edges)
+%     [~, binX] = histc(x, x_edges);
+%     [~, binY] = histc(y, y_edges);
+% 
+%     % Valid indices only
+%     valid = binX > 0 & binY > 0 & binX <= length(x_edges) & binY <= length(y_edges);
+%     binX = binX(valid);
+%     binY = binY(valid);
+%     weights = weights(valid);
+% 
+%     % Accumulate into sparse matrix, then convert to full
+%     occ = full(sparse(binY, binX, weights, length(y_edges), length(x_edges)));
+% end
+% 
+% % ----------------------------------
+% 
+% switch position.ArenaType
+%     case {'Track', 'OpenField'}
+%         x = position.x_px_track;
+%         y = position.y_px_track;
+%         valid = ~isnan(x) & ~isnan(y);
+%         occ = compute_occupancy(x(valid), y(valid), dt(valid), x_edges, y_edges);
+% 
+%         figure; imagesc(x_edges, y_edges, occ);
+%         axis image; set(gca,'YDir','reverse');
+%         title(sprintf('%s Time Occupancy', position.ArenaType));
+%         xlabel('x (px)'); ylabel('y (px)');
+%         colormap(flipud(gray(256))); colorbar;
+%         set(gca, 'CLim', [0, prctile(occ(:), 99)]);
+% 
+%     case 'Sleepbox'
+%         x = position.x_px_sleep;
+%         y = position.y_px_sleep;
+%         valid = ~isnan(x) & ~isnan(y);
+%         occ = compute_occupancy(x(valid), y(valid), dt(valid), x_edges, y_edges);
+% 
+%         figure; imagesc(x_edges, y_edges, occ);
+%         axis image; set(gca,'YDir','reverse');
+%         title('Sleepbox Time Occupancy');
+%         xlabel('x (px)'); ylabel('y (px)');
+%         colormap(flipud(gray(256))); colorbar;
+%         set(gca, 'CLim', [0, prctile(occ(:), 99)]);
+% 
+%     case 'Mixed (Sleepbox + Track)'
+%                 % Extract valid Track data
+%         x_t = position.x_px_track; y_t = position.y_px_track;
+%         valid_t = ~isnan(x_t) & ~isnan(y_t);
+%         occ_track = compute_occupancy(x_t(valid_t), y_t(valid_t), dt(valid_t), x_edges, y_edges);
+% 
+%         % Extract valid Sleepbox data
+%         x_s = position.x_px_sleep; y_s = position.y_px_sleep;
+%         valid_s = ~isnan(x_s) & ~isnan(y_s);
+%         occ_sleep = compute_occupancy(x_s(valid_s), y_s(valid_s), dt(valid_s), x_edges, y_edges);
+% 
+%         % Optional: Gaussian smoothing
+%         if exist('imgaussfilt', 'file') == 2
+%             sigma = 1.5;
+%             occ_track = imgaussfilt(occ_track, sigma);
+%             occ_sleep = imgaussfilt(occ_sleep, sigma);
+%         end
+% 
+%         % Normalize using 95th percentile + gamma correction
+%         track_thresh = prctile(occ_track(:), 95);
+%         sleep_thresh = prctile(occ_sleep(:), 95);
+%         gamma = 0.6;
+% 
+%         occ_track_norm = min(occ_track / track_thresh, 1) .^ gamma;
+%         occ_sleep_norm = min(occ_sleep / sleep_thresh, 1) .^ gamma;
+% 
+%         % Build RGB image (Red = sleepbox, Blue = track)
+%         rgb = zeros([size(occ_track), 3]);
+%         rgb(:,:,1) = occ_sleep_norm;
+%         rgb(:,:,3) = occ_track_norm;
+% 
+%         % Build alpha map to make zero-occupancy areas transparent
+%         alpha_map = max(rgb, [], 3);  % Anything nonzero shows up
+% 
+%         % Plot
+%         fig = figure('Position', [100, 100, 700, 600], 'Color', 'w');
+%         ax = axes('Parent', fig, 'Color', 'w');
+% 
+%         image(x_edges, y_edges, rgb, 'AlphaData', alpha_map, 'Parent', ax);
+%         axis image; set(gca, 'YDir', 'reverse');
+%         title('Time Occupancy: Sleepbox (Red) + Track (Blue)');
+%         xlabel('x (px)'); ylabel('y (px)');
+% 
+%         hold off;
+% 
+%     otherwise
+%         warning('No occupancy map generated — unknown ArenaType: %s', position.ArenaType);
+% end
+
+%% Define the cm to pixel ratio for this session
+
+animalName  = 'B5';
+sessionName = 'mouseB5_CNO_091412_day1';
+
+cm_per_pixel = position.cm_to_px_ratio;
+
+% --- Compute combined velocity in pixels/s and z-score ---
+% We use the combined position data for a full session velocity profile.
+dx_px = diff(position.x_px);
+dy_px = diff(position.y_px);
+dt = diff(position.time_s);
+v_px = sqrt(dx_px.^2 + dy_px.^2) ./ dt;
+
+% Pad the velocity vector with NaN to match the original time vector size
+position.v_px = [NaN; v_px(:)];
+
+% Z-score v_px_s per-session (and dynamically per ArenaType for Mixed sessions)
+if strcmp(position.ArenaType, 'Mixed (Sleepbox + Track)')
+    % Z-score for track epochs
+    v_track_px = position.v_px(position.is_track);
+    v_track_px_z = (v_track_px - nanmean(v_track_px)) ./ nanstd(v_track_px);
+    
+    % Z-score for sleepbox epochs
+    v_sleep_px = position.v_px(position.is_sleep);
+    v_sleep_px_z = (v_sleep_px - nanmean(v_sleep_px)) ./ nanstd(v_sleep_px);
+    
+    % Store the separate z-scores
+    position.v_track_px_z = v_track_px_z;
+    position.v_sleep_px_z = v_sleep_px_z;
+else
+    % Single z-score for non-mixed sessions
+    v_px_z = (position.v_px - nanmean(position.v_px)) ./ nanstd(position.v_px);
+    position.v_px_z = v_px_z;
+end
+
+% --- Compute position in cm and velocity in cm/s ---
+% This conversion is only useful for sessions with a clear absolute scale
+if ismember(position.ArenaType, {'Track', 'Mixed (Sleepbox + Track)'}) && ~isnan(cm_per_pixel)
+    
+    % Convert full pixel coordinates to cm
+    position.x_cm = position.x_px .* cm_per_pixel;
+    position.y_cm = position.y_px .* cm_per_pixel;
+
+    % Compute velocity in cm/s
+    dx_cm = diff(position.x_cm);
+    dy_cm = diff(position.y_cm);
+    v_cm = sqrt(dx_cm.^2 + dy_cm.^2) ./ dt;
+    position.v_cm = [NaN; v_cm(:)];
+    fprintf('Velocity cm/s calculated!\n');
+
+    % Z-score v_cm/s
+    if strcmp(position.ArenaType, 'Mixed (Sleepbox + Track)')
+        v_track_cm = position.v_cm(position.is_track);
+        v_cm_track_z = (v_track_cm - nanmean(v_track_cm)) ./ nanstd(v_track_cm);
+        v_sleep_cm = position.v_cm(position.is_sleep);
+        v_cm_sleep_z = (v_sleep_cm - nanmean(v_sleep_cm)) ./ nanstd(v_sleep_cm);
+        position.v_cm_track_z = v_cm_track_z;
+        position.v_cm_sleep_z = v_cm_sleep_z;
+    else
+        % Single z-score for Track-only sessions
+        v_cm_z = (position.v_cm - nanmean(position.v_cm)) ./ nanstd(position.v_cm);
+        position.v_cm_z = v_cm_z;
+    end
+else
+    fprintf('Skipping cm conversion for ArenaType = %s (no absolute scale)\n', position.ArenaType);
+end
+
+% --- Save the updated struct ---
+saveDir = fullfile(SaveHere, 'PositionExtraction', animalName, sessionName);
+save(fullfile(saveDir,'position_extracted.mat'),'position','-v7.3');
+fprintf('✔ Updated position data with velocity and z-score info to %s\n', fullfile(saveDir,'position_extracted.mat'));
