@@ -712,8 +712,6 @@
 
 %% Define the cm to pixel ratio for this session
 
-%% Define the cm to pixel ratio for this session
-
 animalName  = 'B5';
 sessionName = 'mouseB5_CNO_091412_day1';
 
