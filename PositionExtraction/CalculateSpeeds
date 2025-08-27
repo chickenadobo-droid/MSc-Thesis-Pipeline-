@@ -26,7 +26,7 @@
 % v_sleep_px_z: a vector of z-scored velocities in pixels per second, specifically for the sleep area.
 % x_cm: a vector of all x-coordinates converted to centimeters.
 % y_cm: a vector of all y-coordinates converted to centimeters.
-% v_cm: a vector of all velocities in centimeters per second.
+% v_cm: a vector of all velocities in centimeters per second (capped at 200cm/s to filter out biologically unrealistic speeds)
 % v_cm_track_z: a vector of z-scored velocities in centimeters per second, specifically for the track.
 % v_cm_sleep_z: a vector of z-scored velocities in centimeters per second, specifically for the sleep area (only for Mixed (Track + Sleepbox) sessions with reliable cm to pixel ratios)
 
@@ -712,6 +712,8 @@
 
 %% Define the cm to pixel ratio for this session
 
+%% Define the cm to pixel ratio for this session
+
 animalName  = 'B5';
 sessionName = 'mouseB5_CNO_091412_day1';
 
@@ -761,19 +763,48 @@ if ismember(position.ArenaType, {'Track', 'Mixed (Sleepbox + Track)'}) && ~isnan
     position.v_cm = [NaN; v_cm(:)];
     fprintf('Velocity cm/s calculated!\n');
 
-    % Z-score v_cm/s
+    % Define maximum plausible velocity threshold
+    max_velocity_cm_s = 200; % cm/s
+    
+    % Z-score v_cm/s with outlier removal
     if strcmp(position.ArenaType, 'Mixed (Sleepbox + Track)')
+        % Track velocity z-score (excluding >200 cm/s outliers)
         v_track_cm = position.v_cm(position.is_track);
-        v_cm_track_z = (v_track_cm - nanmean(v_track_cm)) ./ nanstd(v_track_cm);
+        v_track_cm_valid = v_track_cm(v_track_cm <= max_velocity_cm_s | isnan(v_track_cm));
+        track_mean = nanmean(v_track_cm_valid);
+        track_std = nanstd(v_track_cm_valid);
+        v_cm_track_z = (v_track_cm - track_mean) ./ track_std;
+        
+        % Sleepbox velocity z-score (excluding >200 cm/s outliers)
         v_sleep_cm = position.v_cm(position.is_sleep);
-        v_cm_sleep_z = (v_sleep_cm - nanmean(v_sleep_cm)) ./ nanstd(v_sleep_cm);
+        v_sleep_cm_valid = v_sleep_cm(v_sleep_cm <= max_velocity_cm_s | isnan(v_sleep_cm));
+        sleep_mean = nanmean(v_sleep_cm_valid);
+        sleep_std = nanstd(v_sleep_cm_valid);
+        v_cm_sleep_z = (v_sleep_cm - sleep_mean) ./ sleep_std;
+        
         position.v_cm_track_z = v_cm_track_z;
         position.v_cm_sleep_z = v_cm_sleep_z;
+        
+        fprintf('Track z-score: mean=%.2f, std=%.2f (n_valid=%d/%d)\n', ...
+                track_mean, track_std, sum(~isnan(v_track_cm_valid)), length(v_track_cm));
+        fprintf('Sleep z-score: mean=%.2f, std=%.2f (n_valid=%d/%d)\n', ...
+                sleep_mean, sleep_std, sum(~isnan(v_sleep_cm_valid)), length(v_sleep_cm));
     else
-        % Single z-score for Track-only sessions
-        v_cm_z = (position.v_cm - nanmean(position.v_cm)) ./ nanstd(position.v_cm);
+        % Single z-score for Track-only sessions (excluding >200 cm/s outliers)
+        v_cm_valid = position.v_cm(position.v_cm <= max_velocity_cm_s | isnan(position.v_cm));
+        v_cm_mean = nanmean(v_cm_valid);
+        v_cm_std = nanstd(v_cm_valid);
+        v_cm_z = (position.v_cm - v_cm_mean) ./ v_cm_std;
         position.v_cm_z = v_cm_z;
+        
+        fprintf('Velocity z-score: mean=%.2f, std=%.2f (n_valid=%d/%d)\n', ...
+                v_cm_mean, v_cm_std, sum(~isnan(v_cm_valid)), length(position.v_cm));
     end
+    
+    % Report how many outliers were excluded from z-score calculation
+    n_outliers = sum(position.v_cm > max_velocity_cm_s, 'omitnan');
+    fprintf('Excluded %d velocity outliers (>%.0f cm/s) from z-score calculation\n', ...
+            n_outliers, max_velocity_cm_s);
 else
     fprintf('Skipping cm conversion for ArenaType = %s (no absolute scale)\n', position.ArenaType);
 end
