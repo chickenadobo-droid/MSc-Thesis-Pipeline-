@@ -1,0 +1,272 @@
+%% ONE ANIMAL - Build masks + rename sleep→sleepbox, then REMOVE old fields; save to your filename
+animal  = 'B5';
+session = 'mouseB5_CNO_091412_day1';
+
+setpathsbehaviour;
+sessionfolder = fullfile(SaveHere,'PositionExtraction',animal,session);
+inputfile  = fullfile(sessionfolder,'position_extracted.mat');
+
+S = load(inputfile,'position'); 
+p = S.position;
+
+% --- 1) Rename sleep→sleepbox (copy first)
+if isfield(p,'x_px_sleep'),   p.x_px_sleepbox   = p.x_px_sleep;   end
+if isfield(p,'y_px_sleep'),   p.y_px_sleepbox   = p.y_px_sleep;   end
+if isfield(p,'is_sleep'),     p.is_sleepbox     = p.is_sleep;     end
+if isfield(p,'v_sleep_px_z'), p.v_sleepbox_px_z = p.v_sleep_px_z; end
+if isfield(p,'v_cm_sleep_z'), p.v_cm_sleepbox_z = p.v_cm_sleep_z; end
+
+% --- 2) Recompute masks
+X = p.x_px(:); Y = p.y_px(:);
+in_track=false(size(X)); in_sleepbox=false(size(X)); in_arena=false(size(X));
+
+switch p.ArenaType
+  case 'Sleepbox'
+    if isfield(p,'coords') && isfield(p.coords,'sleep_circle') && ~isempty(p.coords.sleep_circle)
+      c = p.coords.sleep_circle;
+      in_sleepbox = (X-c(1)).^2 + (Y-c(2)).^2 <= c(3)^2;
+    end
+    in_arena = in_sleepbox;
+
+  case 'OpenField'
+    if isfield(p,'coords') && isfield(p.coords,'track_outer_poly') && ~isempty(p.coords.track_outer_poly)
+      P = p.coords.track_outer_poly;
+      in_arena = inpolygon(X,Y,P(:,1),P(:,2));
+    end
+
+  case 'Track'
+    Po=[]; Pi=[];
+    if isfield(p,'coords')
+      if isfield(p.coords,'track_outer_poly'), Po=p.coords.track_outer_poly; end
+      if isfield(p.coords,'track_inner_poly'), Pi=p.coords.track_inner_poly; end
+    end
+    if ~isempty(Po)
+      in_track = inpolygon(X,Y,Po(:,1),Po(:,2));
+      if ~isempty(Pi), in_track = in_track & ~inpolygon(X,Y,Pi(:,1),Pi(:,2)); end
+    end
+    in_arena = in_track;
+
+  case 'Mixed (Sleepbox + Track)'
+    Po=[]; Pi=[];
+    if isfield(p,'coords')
+      if isfield(p.coords,'track_outer_poly'), Po=p.coords.track_outer_poly; end
+      if isfield(p.coords,'track_inner_poly'), Pi=p.coords.track_inner_poly; end
+    end
+    if ~isempty(Po)
+      in_track = inpolygon(X,Y,Po(:,1),Po(:,2));
+      if ~isempty(Pi), in_track = in_track & ~inpolygon(X,Y,Pi(:,1),Pi(:,2)); end
+    end
+    if isfield(p,'coords') && isfield(p.coords,'sleep_circle') && ~isempty(p.coords.sleep_circle)
+      c = p.coords.sleep_circle;
+      in_sleepbox = (X-c(1)).^2 + (Y-c(2)).^2 <= c(3)^2;
+    end
+    in_arena = in_track | in_sleepbox;
+end
+in_track = in_track & ~in_sleepbox;
+
+% --- 3) Add masks
+p.in_track    = in_track;
+p.in_sleepbox = in_sleepbox;
+p.in_arena    = in_arena;
+p.is_track    = in_track;
+p.is_sleepbox = in_sleepbox;
+
+% --- 4) Remove legacy fields
+rm = intersect({'x_px_sleep','y_px_sleep','is_sleep','v_sleep_px_z','v_cm_sleep_z','is_track','is_sleepbox'},fieldnames(p));
+if ~isempty(rm)
+  p = rmfield(p,rm);
+  fprintf('Removed old fields: %s\n', strjoin(rm,', '));
+end
+
+% --- 5) Reorder fields neatly
+tpl = {'subject','session','ArenaType','time_s','x_px','y_px','v_px','x_cm','y_cm','v_cm', ...
+       'in_track','in_sleepbox','in_arena', ...
+       'x_px_track','y_px_track','v_track_px_z','v_cm_track_z', ...
+       'x_px_sleepbox','y_px_sleepbox','v_sleepbox_px_z','v_cm_sleepbox_z', ...
+       'coords','track_centerline_x','track_centerline_y','linear_track_length_px','cm_to_px_ratio'};
+fn = fieldnames(p);
+p  = orderfields(p,[intersect(tpl,fn,'stable'); setdiff(fn,tpl,'stable')]);
+
+% --- 6) Save as position_extracted_renamedwithmasks.mat (make a backup if already exists)
+outputfile = fullfile(sessionfolder,'position_extracted_renamedwithmasks.mat');
+if exist(outputfile,'file')
+    backup = fullfile(sessionfolder,['backup_' datestr(now,'yyyymmdd_HHMMSS') '_renamedwithmasks.mat']);
+    copyfile(outputfile,backup);
+    fprintf('Backup made: %s\n', backup);
+end
+
+position = p; 
+save(outputfile,'position','-v7.3');
+fprintf('Saved cleaned struct to %s\n', outputfile);
+
+%% FULL LOOP FOR ALL ANIMALS
+
+%% Batch process all animals and sessions: Build masks + rename sleep→sleepbox, then REMOVE old fields
+% This script loops through all animals and sessions in the PositionExtraction folder
+
+% Set base paths
+setpathsbehaviour;
+
+% Define the main folder containing all animals
+positionExtractionFolder = fullfile(SaveHere, 'PositionExtraction');
+
+% Get all animal folders
+animalFolders = dir(positionExtractionFolder);
+animalFolders = animalFolders([animalFolders.isdir] & ~ismember({animalFolders.name}, {'.', '..'}));
+
+% Initialize counters for summary
+totalProcessed = 0;
+totalErrors = 0;
+errorList = {};
+
+fprintf('Starting batch processing of position data...\n');
+fprintf('Found %d animal folders\n\n', length(animalFolders));
+
+% Loop through each animal
+for a = 1:length(animalFolders)
+    animal = animalFolders(a).name;
+    animalPath = fullfile(positionExtractionFolder, animal);
+    
+    % Get all session folders for this animal
+    sessionFolders = dir(animalPath);
+    sessionFolders = sessionFolders([sessionFolders.isdir] & ~ismember({sessionFolders.name}, {'.', '..'}));
+    
+    fprintf('Processing animal: %s (%d sessions)\n', animal, length(sessionFolders));
+    
+    % Loop through each session for this animal
+    for s = 1:length(sessionFolders)
+        session = sessionFolders(s).name;
+        sessionfolder = fullfile(animalPath, session);
+        inputfile = fullfile(sessionfolder, 'position_extracted.mat');
+        
+        fprintf('  Processing session: %s\n', session);
+        
+        try
+            % Check if input file exists
+            if ~exist(inputfile, 'file')
+                fprintf('    WARNING: position_extracted.mat not found, skipping\n');
+                continue;
+            end
+            
+            % Load the data
+            S = load(inputfile, 'position');
+            p = S.position;
+            
+            % --- 1) Rename sleep→sleepbox (copy first)
+            if isfield(p, 'x_px_sleep'), p.x_px_sleepbox = p.x_px_sleep; end
+            if isfield(p, 'y_px_sleep'), p.y_px_sleepbox = p.y_px_sleep; end
+            if isfield(p, 'is_sleep'), p.is_sleepbox = p.is_sleep; end
+            if isfield(p, 'v_sleep_px_z'), p.v_sleepbox_px_z = p.v_sleep_px_z; end
+            if isfield(p, 'v_cm_sleep_z'), p.v_cm_sleepbox_z = p.v_cm_sleep_z; end
+            
+            % --- 2) Recompute masks
+            X = p.x_px(:); 
+            Y = p.y_px(:);
+            in_track = false(size(X)); 
+            in_sleepbox = false(size(X)); 
+            in_arena = false(size(X));
+            
+            switch p.ArenaType
+                case 'Sleepbox'
+                    if isfield(p, 'coords') && isfield(p.coords, 'sleep_circle') && ~isempty(p.coords.sleep_circle)
+                        c = p.coords.sleep_circle;
+                        in_sleepbox = (X-c(1)).^2 + (Y-c(2)).^2 <= c(3)^2;
+                    end
+                    in_arena = in_sleepbox;
+                    
+                case 'OpenField'
+                    if isfield(p, 'coords') && isfield(p.coords, 'track_outer_poly') && ~isempty(p.coords.track_outer_poly)
+                        P = p.coords.track_outer_poly;
+                        in_arena = inpolygon(X, Y, P(:,1), P(:,2));
+                    end
+                    
+                case 'Track'
+                    Po = []; Pi = [];
+                    if isfield(p, 'coords')
+                        if isfield(p.coords, 'track_outer_poly'), Po = p.coords.track_outer_poly; end
+                        if isfield(p.coords, 'track_inner_poly'), Pi = p.coords.track_inner_poly; end
+                    end
+                    if ~isempty(Po)
+                        in_track = inpolygon(X, Y, Po(:,1), Po(:,2));
+                        if ~isempty(Pi), in_track = in_track & ~inpolygon(X, Y, Pi(:,1), Pi(:,2)); end
+                    end
+                    in_arena = in_track;
+                    
+                case 'Mixed (Sleepbox + Track)'
+                    Po = []; Pi = [];
+                    if isfield(p, 'coords')
+                        if isfield(p.coords, 'track_outer_poly'), Po = p.coords.track_outer_poly; end
+                        if isfield(p.coords, 'track_inner_poly'), Pi = p.coords.track_inner_poly; end
+                    end
+                    if ~isempty(Po)
+                        in_track = inpolygon(X, Y, Po(:,1), Po(:,2));
+                        if ~isempty(Pi), in_track = in_track & ~inpolygon(X, Y, Pi(:,1), Pi(:,2)); end
+                    end
+                    if isfield(p, 'coords') && isfield(p.coords, 'sleep_circle') && ~isempty(p.coords.sleep_circle)
+                        c = p.coords.sleep_circle;
+                        in_sleepbox = (X-c(1)).^2 + (Y-c(2)).^2 <= c(3)^2;
+                    end
+                    in_arena = in_track | in_sleepbox;
+            end
+            
+            in_track = in_track & ~in_sleepbox;
+            
+            % --- 3) Add masks
+            p.in_track = in_track;
+            p.in_sleepbox = in_sleepbox;
+            p.in_arena = in_arena;
+            p.is_track = in_track;
+            p.is_sleepbox = in_sleepbox;
+            
+            % --- 4) Remove legacy fields
+            rm = intersect({'x_px_sleep','y_px_sleep','is_sleep','v_sleep_px_z','v_cm_sleep_z','is_track','is_sleepbox'}, fieldnames(p));
+            if ~isempty(rm)
+                p = rmfield(p, rm);
+                fprintf('    Removed old fields: %s\n', strjoin(rm, ', '));
+            end
+            
+            % --- 5) Reorder fields neatly
+            tpl = {'subject','session','ArenaType','time_s','x_px','y_px','v_px','x_cm','y_cm','v_cm', ...
+                   'in_track','in_sleepbox','in_arena', ...
+                   'x_px_track','y_px_track','v_track_px_z','v_cm_track_z', ...
+                   'x_px_sleepbox','y_px_sleepbox','v_sleepbox_px_z','v_cm_sleepbox_z', ...
+                   'coords','track_centerline_x','track_centerline_y','linear_track_length_px','cm_to_px_ratio'};
+            fn = fieldnames(p);
+            p = orderfields(p, [intersect(tpl, fn, 'stable'); setdiff(fn, tpl, 'stable')]);
+            
+            % --- 6) Save as position_extracted_renamedwithmasks.mat (make a backup if already exists)
+            outputfile = fullfile(sessionfolder, 'position_extracted_renamedwithmasks.mat');
+            if exist(outputfile, 'file')
+                backup = fullfile(sessionfolder, ['backup_' datestr(now, 'yyyymmdd_HHMMSS') '_renamedwithmasks.mat']);
+                copyfile(outputfile, backup);
+                fprintf('    Backup made: %s\n', backup);
+            end
+            
+            position = p;
+            save(outputfile, 'position', '-v7.3');
+            fprintf('    SUCCESS: Saved to position_extracted_renamedwithmasks.mat\n');
+            
+            totalProcessed = totalProcessed + 1;
+            
+        catch ME
+            fprintf('    ERROR processing %s/%s: %s\n', animal, session, ME.message);
+            totalErrors = totalErrors + 1;
+            errorList{end+1} = sprintf('%s/%s: %s', animal, session, ME.message);
+        end
+    end
+    fprintf('\n');
+end
+
+% Summary
+fprintf('=== BATCH PROCESSING COMPLETE ===\n');
+fprintf('Total sessions processed successfully: %d\n', totalProcessed);
+fprintf('Total errors: %d\n', totalErrors);
+
+if totalErrors > 0
+    fprintf('\nErrors encountered:\n');
+    for i = 1:length(errorList)
+        fprintf('  %s\n', errorList{i});
+    end
+end
+
+fprintf('All done!\n');
