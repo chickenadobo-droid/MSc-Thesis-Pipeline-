@@ -1,2 +1,635 @@
-%% This is the final code after all bug fixes established from trying single sessions embedded in a loop to save position struct for each session in the same file structure as the raw data
+%% This is the final code after all bug fixes established from trying single sessions embedded in a loop to save position struct for each session (in the same file structure as the raw data)
 
+%% CONSOLIDATED MULTI-ANIMAL POSITION PROCESSING PIPELINE
+% Processes all animals: B5, B6_Probe, B7, D12_Probe
+% Discovers sessions automatically (expects VT1.nvt in .../<animal>/<session>/raw)
+
+%% --- Setup paths ---
+setpathsbehaviour;  % creates RawDataRoot, ExtractedDataRoot, SaveHere in base
+addpath('D:\Extras\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only')
+
+%% --- Define animals and discover sessions ---
+animals = {'B5', 'B6_Probe', 'B7', 'D12_Probe'};
+all_sessions = {};
+session_count = 0;
+real_track_length_cm = 100;  
+
+for a = 1:length(animals)
+    animalDir = fullfile(RawDataRoot, animals{a});
+    if ~exist(animalDir, 'dir')
+        fprintf('WARNING: Animal directory not found: %s\n', animalDir);
+        continue;
+    end
+    dirContents = dir(animalDir);
+    sessions = dirContents([dirContents.isdir] & ~startsWith({dirContents.name}, '.'));
+    for s = 1:length(sessions)
+        sessionName = sessions(s).name;
+        nvtFile = fullfile(animalDir, sessionName, 'raw', 'VT1.nvt');
+        if exist(nvtFile, 'file')
+            session_count = session_count + 1;
+            all_sessions{session_count} = struct( ...
+                'animal', animals{a}, ...
+                'session', sessionName, ...
+                'nvt_path', nvtFile);
+            fprintf('Found session %d: %s - %s\n', session_count, animals{a}, sessionName);
+        end
+    end
+end
+fprintf('\nTotal sessions found: %d\n\n', session_count);
+
+%% --- Process each session ---
+for sess_idx = 1:length(all_sessions)
+    animalName = all_sessions{sess_idx}.animal;
+    sessionName = all_sessions{sess_idx}.session;
+    nvtFile    = all_sessions{sess_idx}.nvt_path;
+
+    fprintf('=== Processing %d/%d: %s - %s ===\n', sess_idx, length(all_sessions), animalName, sessionName);
+
+    try
+        %% --- Extract from VT file ---
+        [Timestamps, x, y, Header] = Nlx2MatVT(nvtFile, [1 1 1 0 0 0], 1, 1, []); %#ok<NASGU>
+        t_raw = double(Timestamps) * 1e-6;     % seconds
+        x(x==0) = NaN;  y(y==0) = NaN;         % dropouts to NaN
+
+        %% --- First pass prune (spatial outliers) ---
+        [x_cleaned, y_cleaned, t_cleaned] = prune_outlier_points_local(x(:), y(:), t_raw(:));
+
+        % === Canonical clean series used everywhere below ===
+        X   = x_cleaned(:);
+        Y   = y_cleaned(:);
+        t_s = t_cleaned(:);
+
+        %% --- QA plot (cleaned points) ---
+        figure('Name', sprintf('Session Data - %s %s', animalName, sessionName));
+        hAx = gca;
+        plot(hAx, X, Y, '.', 'MarkerSize', 1);
+        axis(hAx, 'equal'); set(hAx, 'YDir', 'reverse');
+        xlabel(hAx, 'x (px)'); ylabel(hAx, 'y (px)');
+        displaySessionName = strrep(sessionName, '_', '\_');
+        title(hAx, sprintf('%s - %s', animalName, displaySessionName));
+
+        %% --- Define arena type manually ---
+        fprintf('\nPlease enter the arena type for %s - %s:\n', animalName, sessionName);
+        fprintf('Valid options: "OpenField", "Sleepbox", "Track", "Mixed (Sleepbox + Track)"\n');
+        ArenaType = input('Enter Arena Type: ', 's');
+
+        %% --- Initialise masks & containers ---
+        in_track_idx       = false(size(X));
+        in_sleep_box_idx   = false(size(X));  % Fixed: was size(Y)
+        track_outer_poly_coords = [];
+        track_inner_poly_coords = [];
+        sleep_poly_coords       = [];
+        sleep_circle_coords     = [];
+        linear_track_length_px  = NaN;
+        track_centerline_x = [];
+        track_centerline_y = [];
+        cm_to_px_ratio     = NaN;
+
+        %% --- Arena-specific region definition ---
+        switch ArenaType
+            case 'OpenField'
+                % Draw polygon with undo (z), restart (r). Enter accepts.
+                [openX, openY, ok] = get_path_with_undo(hAx, ...
+                    'Select OPEN FIELD Perimeter (Enter=finish, z=undo, r=restart, Esc=cancel)', ...
+                    struct('is_closed', true)); % Explicitly mark as closed
+                if ~ok || isempty(openX), error('OpenField selection cancelled.'); end
+                in_track_idx = inpolygon(X, Y, openX, openY);
+                track_outer_poly_coords = [openX(:) openY(:)];
+
+            case 'Sleepbox'
+                % Sleepboxes are always circular
+                [cX, cY, radius] = get_circle_from_perimeter(hAx, ...
+                    'Define CIRCULAR SLEEPBOX: click perimeter points evenly around the circle, Enter to finish');
+                in_sleep_box_idx = (X - cX).^2 + (Y - cY).^2 <= radius^2;
+                sleep_circle_coords = [cX, cY, radius];
+
+            case 'Track'
+                [ox, oy, ok] = get_path_with_undo(hAx, ...
+                    'Select OUTER TRACK Perimeter (Enter=finish, z=undo, r=restart, Esc=cancel)', ...
+                    struct('is_closed', true)); % Explicitly mark as closed
+                if ~ok || isempty(ox), error('Outer track cancelled.'); end
+                track_outer_poly_coords = [ox(:) oy(:)];
+
+                is_holed = input('Does this track have a central hole? (y/n): ', 's');
+                if lower(is_holed) == 'y'
+                    % Inner track with Y-endpoint snapping to outer
+                    snapY = [oy(1) oy(end)];
+                    [ix, iy, ok] = get_path_with_undo(hAx, ...
+                        'Select INNER TRACK Perimeter (Enter=finish, z=undo, r=restart)', ...
+                        struct('SnapY', snapY, 'is_closed', true)); % Explicitly mark as closed
+                    if ~ok || isempty(ix), error('Inner track cancelled.'); end
+                    track_inner_poly_coords = [ix(:) iy(:)];
+                    in_track_idx = inpolygon(X, Y, ox, oy) & ~inpolygon(X, Y, ix, iy);
+                else
+                    in_track_idx = inpolygon(X, Y, ox, oy);
+                end
+
+                % Closed polygon perimeter
+                linear_track_length_px = polygon_perimeter(ox, oy);
+
+                % Accurate centerline if desired
+                if ~isempty(track_inner_poly_coords)
+                    do_centerline = input('Calculate accurate centerline length? (y/n): ', 's');
+                    if lower(do_centerline) == 'y'
+                        real_track_length_cm = 100;
+                        [track_centerline_x, track_centerline_y, linear_track_length_px, cm_to_px_ratio] = ...
+                            calculate_track_centerline(track_outer_poly_coords, track_inner_poly_coords, hAx, real_track_length_cm);
+                    end
+                end
+
+            case 'Mixed (Sleepbox + Track)'
+                [ox, oy, ok] = get_path_with_undo(hAx, ...
+                    'Select OUTER EXPERIMENTAL AREA (Enter=finish, z=undo, r=restart)', ...
+                    struct('is_closed', true)); % Explicitly mark as closed
+                if ~ok || isempty(ox), error('Experimental area selection cancelled.'); end
+                track_outer_poly_coords = [ox(:) oy(:)];
+
+                snapY = [oy(1) oy(end)];
+                [ix, iy, ok] = get_path_with_undo(hAx, ...
+                    'Select INNER TRACK Perimeter (Enter=finish, z=undo, r=restart)', ...
+                    struct('SnapY', snapY, 'is_closed', true)); % Explicitly mark as closed
+                if ~ok || isempty(ix), error('Inner track cancelled.'); end
+                track_inner_poly_coords = [ix(:) iy(:)];
+
+                % Sleepboxes are always circular
+                [cX, cY, radius] = get_circle_from_perimeter(hAx, ...
+                    'Define CIRCULAR SLEEPBOX: click perimeter points, Enter to finish');
+                in_sleep_box_idx = (X - cX).^2 + (Y - cY).^2 <= radius^2;
+                sleep_circle_coords = [cX, cY, radius];
+
+                in_track_idx = inpolygon(X, Y, ox, oy) & ~inpolygon(X, Y, ix, iy) & ~in_sleep_box_idx;
+
+                real_track_length_cm = 100;
+                [track_centerline_x, track_centerline_y, linear_track_length_px, cm_to_px_ratio] = ...
+                    calculate_track_centerline(track_outer_poly_coords, track_inner_poly_coords, hAx, real_track_length_cm);
+
+            otherwise
+                error('Invalid ArenaType entered.');
+        end
+
+        %% --- Filter & interpolate (safe) ---
+        % Build per-region series with NaNs outside the region
+        t_track = t_s; x_track = X; y_track = Y;
+        t_track(~in_track_idx) = NaN; x_track(~in_track_idx) = NaN; y_track(~in_track_idx) = NaN;
+
+        t_sleep = t_s; x_sleep = X; y_sleep = Y;
+        t_sleep(~in_sleep_box_idx) = NaN; x_sleep(~in_sleep_box_idx) = NaN; y_sleep(~in_sleep_box_idx) = NaN;
+
+        % Interpolate back to full t_s (safe guard)
+        X_interp_track = interp_safe(t_track, x_track, t_s);
+        Y_interp_track = interp_safe(t_track, y_track, t_s);
+        X_interp_sleep = interp_safe(t_sleep, x_sleep, t_s);
+        Y_interp_sleep = interp_safe(t_sleep, y_sleep, t_s);
+
+        %% --- Build output struct ---
+        position = struct();
+        position.time_s          = t_s(:);
+        position.x_px_track      = X_interp_track(:);
+        position.y_px_track      = Y_interp_track(:);
+        position.x_px_sleep      = X_interp_sleep(:);
+        position.y_px_sleep      = Y_interp_sleep(:);
+        
+        % Fixed: Better handling of combined position data
+        x_combined = position.x_px_track;
+        x_combined(isnan(x_combined)) = position.x_px_sleep(isnan(x_combined));
+        y_combined = position.y_px_track;
+        y_combined(isnan(y_combined)) = position.y_px_sleep(isnan(y_combined));
+        
+        position.x_px = x_combined;
+        position.y_px = y_combined;
+        
+        position.subject         = animalName;
+        position.session         = sessionName;
+        position.ArenaType       = ArenaType;
+        position.is_track        = ~isnan(position.x_px_track);
+        position.is_sleep        = ~isnan(position.x_px_sleep);
+        position.coords.track_outer_poly = track_outer_poly_coords;
+        position.coords.track_inner_poly = track_inner_poly_coords;
+        position.coords.sleep_poly       = sleep_poly_coords;
+        position.coords.sleep_circle     = sleep_circle_coords;
+        position.linear_track_length_px  = linear_track_length_px;
+        position.track_centerline_x      = track_centerline_x;
+        position.track_centerline_y      = track_centerline_y;
+        position.cm_to_px_ratio          = cm_to_px_ratio;
+
+        %% --- Velocity (px) ---
+        dx_px = diff(position.x_px);
+        dy_px = diff(position.y_px);
+        dt    = diff(position.time_s);
+        
+        % Fixed: Better handling of velocity calculation with NaNs
+        valid_positions = ~isnan(position.x_px) & ~isnan(position.y_px);
+        v_px = nan(size(position.x_px));
+        
+        if sum(valid_positions) > 1
+            v_px_temp = sqrt(dx_px.^2 + dy_px.^2) ./ dt;
+            v_px(2:end) = v_px_temp;
+        end
+        position.v_px = v_px;
+
+        % Z-score velocity (region-specific for Mixed)
+        if strcmp(position.ArenaType, 'Mixed (Sleepbox + Track)')
+            v_track = position.v_px; v_track(~position.is_track) = NaN;
+            if sum(~isnan(v_track)) > 1  % Check if there's data to calculate stats
+                mu = nanmean(v_track); sd = nanstd(v_track);
+                if sd > 0
+                    position.v_track_px_z = (v_track - mu) ./ sd;
+                else
+                    position.v_track_px_z = zeros(size(v_track));
+                end
+            else
+                position.v_track_px_z = nan(size(v_track));
+            end
+
+            v_sleep = position.v_px; v_sleep(~position.is_sleep) = NaN;
+            if sum(~isnan(v_sleep)) > 1  % Check if there's data to calculate stats
+                mu = nanmean(v_sleep); sd = nanstd(v_sleep);
+                if sd > 0
+                    position.v_sleep_px_z = (v_sleep - mu) ./ sd;
+                else
+                    position.v_sleep_px_z = zeros(size(v_sleep));
+                end
+            else
+                position.v_sleep_px_z = nan(size(v_sleep));
+            end
+        else
+            if sum(~isnan(position.v_px)) > 1  % Check if there's data to calculate stats
+                mu = nanmean(position.v_px); sd = nanstd(position.v_px);
+                if sd > 0
+                    position.v_px_z = (position.v_px - mu) ./ sd;
+                else
+                    position.v_px_z = zeros(size(position.v_px));
+                end
+            else
+                position.v_px_z = nan(size(position.v_px));
+            end
+        end
+
+        %% --- Velocity (cm), optional if cm_to_px_ratio available ---
+        if (strcmp(position.ArenaType,'Track') || strcmp(position.ArenaType,'Mixed (Sleepbox + Track)')) && ~isnan(cm_to_px_ratio)
+            position.x_cm = position.x_px .* cm_to_px_ratio;
+            position.y_cm = position.y_px .* cm_to_px_ratio;
+
+            dx_cm = diff(position.x_cm);
+            dy_cm = diff(position.y_cm);
+            v_cm = nan(size(position.x_cm));
+            
+            if sum(~isnan(position.x_cm) & ~isnan(position.y_cm)) > 1
+                v_cm_temp = sqrt(dx_cm.^2 + dy_cm.^2) ./ dt;
+                v_cm(2:end) = v_cm_temp;
+            end
+            position.v_cm = v_cm;
+
+            max_velocity_cm_s = 200;
+            is_out = position.v_cm > max_velocity_cm_s & ~isnan(position.v_cm);
+
+            if strcmp(position.ArenaType, 'Mixed (Sleepbox + Track)')
+                v_tr = position.v_cm; v_tr(~position.is_track) = NaN;
+                v_tr_valid = v_tr; v_tr_valid(v_tr_valid > max_velocity_cm_s) = NaN;
+                if sum(~isnan(v_tr_valid)) > 1
+                    mu = nanmean(v_tr_valid); sd = nanstd(v_tr_valid);
+                    if sd > 0
+                        position.v_cm_track_z = (v_tr - mu) ./ sd;
+                    else
+                        position.v_cm_track_z = zeros(size(v_tr));
+                    end
+                else
+                    position.v_cm_track_z = nan(size(v_tr));
+                end
+
+                v_sl = position.v_cm; v_sl(~position.is_sleep) = NaN;
+                v_sl_valid = v_sl; v_sl_valid(v_sl_valid > max_velocity_cm_s) = NaN;
+                if sum(~isnan(v_sl_valid)) > 1
+                    mu = nanmean(v_sl_valid); sd = nanstd(v_sl_valid);
+                    if sd > 0
+                        position.v_cm_sleep_z = (v_sl - mu) ./ sd;
+                    else
+                        position.v_cm_sleep_z = zeros(size(v_sl));
+                    end
+                else
+                    position.v_cm_sleep_z = nan(size(v_sl));
+                end
+            else
+                v_valid = position.v_cm; v_valid(v_valid > max_velocity_cm_s) = NaN;
+                if sum(~isnan(v_valid)) > 1
+                    mu = nanmean(v_valid); sd = nanstd(v_valid);
+                    if sd > 0
+                        position.v_cm_z = (position.v_cm - mu) ./ sd;
+                    else
+                        position.v_cm_z = zeros(size(position.v_cm));
+                    end
+                else
+                    position.v_cm_z = nan(size(position.v_cm));
+                end
+            end
+
+            fprintf('Excluded %d velocity outliers (>%.0f cm/s) from z-score calc\n', sum(is_out), max_velocity_cm_s);
+        end
+
+        %% --- Save ---
+        saveDir = fullfile(SaveHere, 'PositionExtraction', animalName, sessionName);
+        if ~exist(saveDir,'dir'), mkdir(saveDir); end
+        save(fullfile(saveDir,'position_extracted.mat'), 'position', '-v7.3');
+        fprintf('✔ Saved: %s\n', fullfile(saveDir,'position_extracted.mat'));
+
+        close all;
+
+    catch ME
+        fprintf('❌ ERROR processing %s - %s: %s\n', animalName, sessionName, ME.message);
+        fprintf('Error details: %s\n', getReport(ME));
+        close all;
+        continue;
+    end
+    fprintf('\n');
+end
+
+fprintf('=== PROCESSING COMPLETE ===\n');
+fprintf('Processed %d sessions across %d animals\n', length(all_sessions), length(animals));
+
+
+%% =========================
+%% Local helper functions
+%% =========================
+
+function [x_poly, y_poly, ok] = get_path_with_undo(ax, title_str, opts)
+% Interactive path/polygon drawing with undo & restart.
+% Keys:
+%   Enter/Return = finish & ACCEPT
+%   z            = undo last vertex
+%   r            = restart polygon
+%   Esc          = cancel
+% opts.SnapY     = [yStart yEnd] -> sets y(1)=yStart, y(end)=yEnd on finish
+% opts.LineSpec  = 'r-' (default)
+% opts.MarkerSpec= 'ro' (default)
+% opts.is_closed = true/false (default false). If true, connects last point to first.
+% Returns ok=false if cancelled.
+    if nargin < 3, opts = struct(); end
+    if ~isfield(opts,'SnapY'), opts.SnapY = []; end
+    if ~isfield(opts,'LineSpec'), opts.LineSpec = 'r-'; end
+    if ~isfield(opts,'MarkerSpec'), opts.MarkerSpec = 'ro'; end
+    if ~isfield(opts,'is_closed'), opts.is_closed = false; end % NEW OPTION
+
+    axes(ax); hold(ax,'on'); title(ax, title_str);
+
+    x = []; y = [];
+    hLine = plot(ax, NaN, NaN, opts.LineSpec, 'LineWidth', 2);
+    hPts  = plot(ax, NaN, NaN, opts.MarkerSpec, 'MarkerFaceColor','r','MarkerSize',5);
+
+    cancelled = false;
+
+    set(gcf,'WindowButtonDownFcn', @onClick);
+    set(gcf,'KeyPressFcn',        @onKey);
+    uiwait(gcf);
+    set(gcf,'WindowButtonDownFcn',''); set(gcf,'KeyPressFcn','');
+
+    if cancelled || isempty(x)
+        x_poly = []; y_poly = []; ok = false;
+        if ishandle(hLine), delete(hLine); end
+        if ishandle(hPts),  delete(hPts);  end
+        hold(ax,'off');
+        return;
+    end
+
+    % Snap Y endpoints if requested
+    if ~isempty(opts.SnapY) && numel(x) >= 2
+        y(1)   = opts.SnapY(1);
+        y(end) = opts.SnapY(2);
+    end
+
+    % finalize (display closed loop if requested, otherwise just the path)
+    if opts.is_closed && numel(x) > 1 % Only close if there are at least 2 points
+        set(hLine,'XData',[x x(1)], 'YData',[y y(1)]);
+    else
+        set(hLine,'XData',x, 'YData',y); % For open paths (like centerline)
+    end
+    set(hPts, 'XData',x, 'YData',y);
+
+    x_poly = x(:); y_poly = y(:); ok = true;
+    hold(ax,'off');
+
+    % ---- callbacks ----
+    function onClick(~,~)
+        pt = get(ax, 'CurrentPoint');
+        x(end+1) = pt(1,1);
+        y(end+1) = pt(1,2);
+        refreshPlots();
+    end
+    function onKey(~,evt)
+        key = lower(evt.Key);
+        switch key
+            case {'return','enter'}
+                uiresume(gcf);          % accept by default
+            case 'z'
+                if ~isempty(x), x(end) = []; y(end) = []; refreshPlots(); end
+            case 'r'
+                x = []; y = []; refreshPlots();
+            case 'escape'
+                cancelled = true; uiresume(gcf);
+        end
+    end
+    function refreshPlots()
+        if isempty(x)
+            set(hLine,'XData',NaN,'YData',NaN);
+            set(hPts, 'XData',NaN,'YData',NaN);
+        else
+            if opts.is_closed && numel(x) > 1
+                 set(hLine,'XData',[x x(1)], 'YData',[y y(1)]);
+            else
+                 set(hLine,'XData',x, 'YData',y);
+            end
+            set(hPts, 'XData',x, 'YData',y);
+        end
+        drawnow;
+    end
+end
+
+% get_circle_from_perimeter function
+
+function [centerX, centerY, radius] = get_circle_from_perimeter(ax, prompt)
+    if nargin < 2
+        prompt = 'Click points around the circular perimeter (Enter=finish, z=undo, r=restart, Esc=cancel)';
+    end
+
+    [x_points, y_points, ok] = get_path_with_undo(ax, prompt, ...
+        struct('is_closed', false, 'LineSpec', 'm-', 'MarkerSpec', 'mo'));  % magenta markers
+
+    if ~ok || numel(x_points) < 3
+        error('At least 3 points are required to fit a circle. Selection cancelled or insufficient points.');
+    end
+
+    % Ensure we have column vectors
+    x_points = x_points(:);
+    y_points = y_points(:);
+
+    % Fit circle using linear least squares method (Kasa method)
+    % Handle potential numerical issues
+    try
+        A = [2*x_points, 2*y_points, ones(size(x_points))];
+        b = x_points.^2 + y_points.^2;
+        
+        % Check for rank deficiency
+        if rank(A) < 3
+            error('Points are too collinear to fit a unique circle');
+        end
+        
+        params = A \ b;
+
+        centerX = params(1);
+        centerY = params(2);
+        radius  = sqrt(params(3) + centerX^2 + centerY^2);
+        
+        % Sanity check the results
+        if ~isfinite(centerX) || ~isfinite(centerY) || ~isfinite(radius) || radius <= 0
+            error('Circle fitting produced invalid results');
+        end
+
+    catch ME
+        fprintf('Circle fitting failed: %s\n', ME.message);
+        fprintf('Using centroid-based approximation instead...\n');
+        
+        % Fallback: use centroid and average distance
+        centerX = mean(x_points);
+        centerY = mean(y_points);
+        distances = sqrt((x_points - centerX).^2 + (y_points - centerY).^2);
+        radius = mean(distances);
+    end
+
+    % Plot the fitted circle
+    theta = linspace(0, 2*pi, 200);
+    x_circle = centerX + radius * cos(theta);
+    y_circle = centerY + radius * sin(theta);
+
+    % Ensure we're plotting on the correct axes
+    axes(ax);
+    hold(ax, 'on');
+    
+    % Delete any existing circle plots to avoid clutter
+    h_existing = findobj(ax, 'Tag', 'fitted_circle');
+    delete(h_existing);
+    
+    % Plot the new circle
+    h_circle = plot(ax, x_circle, y_circle, 'g-', 'LineWidth', 2, 'Tag', 'fitted_circle');
+    h_center = plot(ax, centerX, centerY, 'gx', 'MarkerSize', 10, 'LineWidth', 2, 'Tag', 'fitted_circle');
+    
+    title(ax, sprintf('Fitted circle: center = (%.1f, %.1f), radius = %.1f px', centerX, centerY, radius));
+    
+    % Force a drawnow to ensure the plot updates
+    drawnow;
+    
+    hold(ax, 'off');
+    
+    fprintf('Circle fitted: center=(%.1f, %.1f), radius=%.1f px\n', centerX, centerY, radius);
+end
+
+
+function perim = polygon_perimeter(xv, yv)
+    xv = xv(:); yv = yv(:);
+    xv = [xv; xv(1)]; yv = [yv; yv(1)];
+    perim = sum(sqrt(diff(xv).^2 + diff(yv).^2));
+end
+
+function [centerline_x, centerline_y, linear_track_length_px, cm_to_px_ratio] = ...
+         calculate_track_centerline(track_outer_poly, track_inner_poly, ax, real_track_length_cm)
+
+    % sanity
+    if isempty(track_outer_poly) || isempty(track_inner_poly)
+        centerline_x = []; centerline_y = [];
+        linear_track_length_px = NaN; cm_to_px_ratio = NaN; return;
+    end
+
+    axes(ax); hold(ax, 'on');
+    plot(ax, [track_outer_poly(:,1); track_outer_poly(1,1)], ...
+             [track_outer_poly(:,2); track_outer_poly(1,2)], 'k-', 'LineWidth', 2);
+    plot(ax, [track_inner_poly(:,1); track_inner_poly(1,1)], ...
+             [track_inner_poly(:,2); track_inner_poly(1,2)], 'k-', 'LineWidth', 2);
+
+    % --- live, undoable path draw ---
+    [centerline_x, centerline_y, ok] = get_path_with_undo(ax, ...
+        'Draw the CENTERLINE (Enter=finish & accept, z=undo, r=restart, Esc=cancel)', ...
+        struct('is_closed', false, 'LineSpec', 'g-', 'MarkerSpec', 'go')); % Ensure it's not closed and uses green
+    if ~ok
+        linear_track_length_px = NaN; cm_to_px_ratio = NaN; hold(ax,'off'); return;
+    end
+
+    % length & ratio
+    d = hypot(diff(centerline_x), diff(centerline_y));
+    linear_track_length_px = nansum(d);
+
+    if isfinite(real_track_length_cm) && real_track_length_cm > 0 && ...
+       isfinite(linear_track_length_px) && linear_track_length_px > 0
+        cm_to_px_ratio = real_track_length_cm / linear_track_length_px;
+    else
+        cm_to_px_ratio = NaN;
+    end
+
+    drawnow;
+    hold(ax, 'off');
+end
+
+
+function [x_out, y_out, t_out] = prune_outlier_points_local(x_in, y_in, t_in)
+    % Robust pixel-velocity MAD pruning (local version to avoid name clash)
+    
+    % Input validation
+    if length(x_in) < 3 || length(y_in) < 3 || length(t_in) < 3
+        x_out = x_in; y_out = y_in; t_out = t_in;
+        return;
+    end
+    
+    dx = diff(x_in); dy = diff(y_in);
+    dist = hypot(dx, dy);
+    dt = diff(t_in);
+    
+    % Avoid division by zero
+    dt(dt <= 0) = eps;
+    
+    speed = dist ./ dt;
+
+    % Check if we have enough valid speed measurements
+    valid_speed = isfinite(speed);
+    if sum(valid_speed) < 2
+        x_out = x_in; y_out = y_in; t_out = t_in;
+        return;
+    end
+
+    med_spd = median(speed(valid_speed), 'omitnan');
+    mad_spd = median(abs(speed(valid_speed) - med_spd), 'omitnan');
+    
+    % Avoid division by zero in MAD calculation
+    if mad_spd == 0
+        mad_spd = std(speed(valid_speed), 'omitnan');
+        if mad_spd == 0
+            x_out = x_in; y_out = y_in; t_out = t_in;
+            return;
+        end
+    end
+    
+    threshold = med_spd + 5*mad_spd;
+
+    outlier_idx = find(speed > threshold);
+    indices_to_remove = unique([outlier_idx; outlier_idx+1]);
+    indices_to_remove = indices_to_remove(indices_to_remove <= numel(x_in));
+
+    x_out = x_in; y_out = y_in; t_out = t_in;
+    x_out(indices_to_remove) = NaN;
+    y_out(indices_to_remove) = NaN;
+end
+
+function yi = interp_safe(t_src, x_src, t_q)
+    % Interpolate with guards: needs >=2 valid points & monotonic time
+    valid = ~isnan(t_src) & ~isnan(x_src);
+    if nnz(valid) >= 2
+        ts = t_src(valid); xs = x_src(valid);
+        [ts, ord] = sort(ts); xs = xs(ord);
+        
+        % Check for duplicate time points and remove them
+        [ts_unique, unique_idx] = unique(ts);
+        xs_unique = xs(unique_idx);
+        
+        if length(ts_unique) >= 2 && all(diff(ts_unique) > 0)
+            yi = interp1(ts_unique, xs_unique, t_q, 'linear', NaN);
+            return;
+        end
+    end
+    yi = nan(size(t_q));
+end
