@@ -1,0 +1,380 @@
+% Batch script to loop through all experiments and perform interactive cropping.
+% This version handles a nested directory structure: data_root_path / animal_folder / experiment_folder
+
+% --- Step 1: Set the root path containing all your animal folders ---
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+
+% Get a list of all animal subdirectories (e.g., 'B5', 'B6_Probe')
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir]); % Keep only directories
+animal_folders = animal_folders(~ismember({animal_folders.name},{'.','..'})); % Remove . and ..
+
+processed_count = 0;
+
+% --- User Input for Continue or Restart ---
+user_choice = input('Press 1 to continue where you left off, or 2 to start from the beginning: ');
+
+% --- Step 2: Loop through each animal folder ---
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    
+    % Get a list of all experiment subdirectories for this animal
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir]); % Keep only directories
+    experiment_folders = experiment_folders(~ismember({experiment_folders.name},{'.','..'})); % Remove . and ..
+    
+    % --- Step 3: Loop through each experiment folder for the current animal ---
+    for i = 1:length(experiment_folders)
+        current_experiment_path = fullfile(current_animal_path, experiment_folders(i).name);
+        
+        % Check if a cropped file already exists
+        cropped_file_path = fullfile(current_experiment_path, 'position_extracted_rwm_croppedintimefinal.mat');
+        
+        % Decide whether to process based on user input
+        if user_choice == 1 && exist(cropped_file_path, 'file')
+            fprintf('Skipping processed experiment: %s\n', experiment_folders(i).name);
+            continue; % Skip to the next iteration of the inner loop
+        end
+        
+        fprintf('\n--- Processing experiment %d of %d in animal %s: %s ---\n', ...
+                i, length(experiment_folders), animal_folders(j).name, experiment_folders(i).name);
+        
+        % Construct the full path to the .mat file for this experiment
+        file_path = fullfile(current_experiment_path, 'position_extracted_renamedwithmasks.mat');
+        
+        % --- Step 4: Check if the file exists and process it ---
+        if exist(file_path, 'file')
+            fprintf('Loading position data from: %s\n', file_path);
+            
+            try
+                % Load the position struct
+                loaded_data = load(file_path, 'position');
+                position = loaded_data.position;
+                
+                % Create a simple struct to pass to the cropping function
+                sessions_to_process = struct();
+                sessions_to_process.position = position;
+                
+                fprintf('Calling NEW robust crop_in_time_interactive_final function...\n');
+                
+                % Call the interactive cropping function
+                cropped_sessions = crop_in_time_interactive_final(sessions_to_process);
+                
+                % Extract the cropped position struct
+                position_cropped_data = cropped_sessions(1).position;
+                
+                % Check if cropped field was created
+                if isfield(position_cropped_data, 'cropped')
+                    fprintf('✓ SUCCESS! Cropped structure created for this session.\n');
+                    
+                    % Add exposures to the struct
+                    if isfield(position_cropped_data.cropped, 'track')
+                        position_cropped_data.track_exposures = size(position_cropped_data.cropped.track.click_ranges, 1);
+                    end
+                    if isfield(position_cropped_data.cropped, 'sleepbox')
+                        position_cropped_data.sleepbox_exposures = size(position_cropped_data.cropped.sleepbox.click_ranges, 1);
+                    end
+                    if isfield(position_cropped_data.cropped, 'arena')
+                        position_cropped_data.arena_exposures = size(position_cropped_data.cropped.arena.click_ranges, 1);
+                    end
+                    
+                    % Define the new file name and path
+                    save_path = fullfile(current_experiment_path, 'position_extracted_rwm_croppedintimefinal.mat');
+                    
+                    % Save the new struct
+                    position = position_cropped_data;
+                    save(save_path, 'position');
+                    
+                    fprintf('✓ Cropped data saved to: %s\n', save_path);
+                    processed_count = processed_count + 1;
+                    
+                else
+                    fprintf('✗ ERROR: Cropped field was not created for this session. Skipping.\n');
+                end
+            catch ME
+                fprintf('✗ An error occurred while processing %s: %s\n', experiment_folders(i).name, ME.message);
+                fprintf('  Skipping to the next experiment.\n');
+            end
+            
+        else
+            fprintf('✗ File not found: %s\n', file_path);
+            fprintf('  Skipping to the next experiment.\n');
+        end
+    end
+end
+
+fprintf('\n--- Batch Processing Complete ---\n');
+fprintf('Processed a total of %d experiments.\n', processed_count);
+
+% %% Crop In Time Helper Function
+% 
+% function [new_position_struct] = crop_in_time_interactive_final(sessions)
+% %   Interactively crops data for various arena types.
+% %   This function is a robust version that handles 'Mixed (Sleepbox + Track)', 'Track',
+% %   'Sleepbox', and 'Openfield' sessions by using a switch statement.
+% %   It plots the relevant position data and prompts the user to click to define
+% %   the start and end times for exposures. It includes interactive controls
+% %   for a better user experience (z to undo, r to reset, green lines for clicks).
+% %
+% %   Creates an organized structure under position.cropped
+% %
+% %   Args:
+% %       sessions: A struct array where each element contains a 'position'
+% %                 struct with fields like time_s, x_px, y_px, and ArenaType.
+% %
+% %   Returns:
+% %       new_position_struct: A new struct array with the cropped time indices
+% %                           organized under position.cropped
+% 
+% num_sessions = length(sessions);
+% new_position_struct = sessions; % Pre-allocate the new structure
+% 
+% for i = 1:num_sessions
+%     % Get the current session's position data
+%     position = sessions(i).position;
+% 
+%     fprintf('Processing Session %d of %d (Arena Type: %s)...\n', i, num_sessions, position.ArenaType);
+% 
+%     % Create the figure with both x and y position plots
+%     fig = figure('Name', ['Session ' num2str(i) ': Interactive Cropping']);
+% 
+%     % Use a switch statement to handle different arena types
+%     switch position.ArenaType
+%         case {'Mixed (Sleepbox + Track)'}
+%             % Plot both track and sleepbox data
+%             subplot(2,1,1);
+%             plot(position.time_s(position.in_track), position.x_px(position.in_track), 'b', 'DisplayName', 'Track');
+%             hold on;
+%             plot(position.time_s(position.in_sleepbox), position.x_px(position.in_sleepbox), 'r', 'DisplayName', 'Sleepbox');
+%             title('X Position Over Time');
+%             xlabel('Time (s)');
+%             ylabel('X Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+% 
+%             subplot(2,1,2);
+%             plot(position.time_s(position.in_track), position.y_px(position.in_track), 'b', 'DisplayName', 'Track');
+%             hold on;
+%             plot(position.time_s(position.in_sleepbox), position.y_px(position.in_sleepbox), 'r', 'DisplayName', 'Sleepbox');
+%             title('Y Position Over Time');
+%             xlabel('Time (s)');
+%             ylabel('Y Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+% 
+%             % --- Select Track Sessions ---
+%             track_clicks = get_clicks('Select start/end times for TRACK. Press Z to undo, R to reset, Enter to finish.', fig);
+% 
+%             % --- Select Sleepbox Sessions ---
+%             sleepbox_clicks = get_clicks('Select start/end times for SLEEPBOX. Press Z to undo, R to reset, Enter to finish.', fig);
+% 
+%         case 'Track'
+%             % Plot only track data
+%             subplot(2,1,1);
+%             plot(position.time_s(position.in_track), position.x_px(position.in_track), 'b', 'DisplayName', 'Track');
+%             title('X Position Over Time (Track only)');
+%             xlabel('Time (s)');
+%             ylabel('X Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+% 
+%             subplot(2,1,2);
+%             plot(position.time_s(position.in_track), position.y_px(position.in_track), 'b', 'DisplayName', 'Track');
+%             title('Y Position Over Time (Track only)');
+%             xlabel('Time (s)');
+%             ylabel('Y Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+% 
+%             % --- Select Track Sessions ---
+%             track_clicks = get_clicks('Select start/end times for TRACK. Press Z to undo, R to reset, Enter to finish.', fig);
+%             sleepbox_clicks = []; % No sleepbox clicks
+% 
+%         case 'Sleepbox'
+%             % Plot only sleepbox data
+%             subplot(2,1,1);
+%             plot(position.time_s(position.in_sleepbox), position.x_px(position.in_sleepbox), 'r', 'DisplayName', 'Sleepbox');
+%             title('X Position Over Time (Sleepbox only)');
+%             xlabel('Time (s)');
+%             ylabel('X Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+%             subplot(2,1,2);
+%             plot(position.time_s(position.in_sleepbox), position.y_px(position.in_sleepbox), 'r', 'DisplayName', 'Sleepbox');
+%             title('Y Position Over Time (Sleepbox only)');
+%             xlabel('Time (s)');
+%             ylabel('Y Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+%             % --- Select Sleepbox Sessions ---
+%             sleepbox_clicks = get_clicks('Select start/end times for SLEEPBOX. Press Z to undo, R to reset, Enter to finish.', fig);
+%             track_clicks = []; % No track clicks
+% 
+%         case 'OpenField'
+%             % Plot all arena data
+%             subplot(2,1,1);
+%             plot(position.time_s(position.in_arena), position.x_px(position.in_arena), 'k', 'DisplayName', 'Openfield');
+%             title('X Position Over Time (Open Field)');
+%             xlabel('Time (s)');
+%             ylabel('X Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+%             subplot(2,1,2);
+%             plot(position.time_s(position.in_arena), position.y_px(position.in_arena), 'k', 'DisplayName', 'Openfield');
+%             title('Y Position Over Time (Open Field)');
+%             xlabel('Time (s)');
+%             ylabel('Y Position (px)');
+%             legend('show', 'Location', 'northeastoutside'); % Legend outside
+% 
+%             % --- Select Arena Sessions ---
+%             arena_clicks = get_clicks('Select start/end times for ARENA. Press Z to undo, R to reset, Enter to finish.', fig);
+%             track_clicks = []; % Not applicable
+%             sleepbox_clicks = []; % Not applicable
+% 
+%         otherwise
+%             error('Unknown ArenaType: %s. Please specify ''Mixed (Sleepbox + Track)'', ''Track'', ''Sleepbox'', or ''OpenField''.', position.ArenaType);
+%     end
+%     % --- Store all cropped data in the new struct ---
+%     % Initialize the cropped field to ensure it always exists
+%     new_position_struct(i).position.cropped = struct();
+%     all_clicks_times = [];
+%     % Process Track Clicks
+%     if ~isempty(track_clicks)
+%         track_indices = false(size(position.time_s));
+%         for j = 1:size(track_clicks, 1)
+%             start_time = min(track_clicks(j,:));
+%             end_time = max(track_clicks(j,:));
+%             track_indices = track_indices | (position.time_s >= start_time & position.time_s <= end_time & position.in_track);
+%         end
+%         new_position_struct(i).position.cropped.track.indices = find(track_indices);
+%         new_position_struct(i).position.cropped.track.timestamps = position.time_s(track_indices);
+%         new_position_struct(i).position.cropped.track.click_ranges = track_clicks;
+%         all_clicks_times = [all_clicks_times; track_clicks(:)];
+%         fprintf('✓ Track data stored: %d indices\n', length(find(track_indices)));
+%     end
+%     % Process Sleepbox Clicks
+%     if ~isempty(sleepbox_clicks)
+%         sleepbox_indices = false(size(position.time_s));
+%         for j = 1:size(sleepbox_clicks, 1)
+%             start_time = min(sleepbox_clicks(j,:));
+%             end_time = max(sleepbox_clicks(j,:));
+%             sleepbox_indices = sleepbox_indices | (position.time_s >= start_time & position.time_s <= end_time & position.in_sleepbox);
+%         end
+%         new_position_struct(i).position.cropped.sleepbox.indices = find(sleepbox_indices);
+%         new_position_struct(i).position.cropped.sleepbox.timestamps = position.time_s(sleepbox_indices);
+%         new_position_struct(i).position.cropped.sleepbox.click_ranges = sleepbox_clicks;
+%         all_clicks_times = [all_clicks_times; sleepbox_clicks(:)];
+%         fprintf('✓ Sleepbox data stored: %d indices\n', length(find(sleepbox_indices)));
+%     end
+%     % Process Openfield Clicks
+%     if exist('arena_clicks', 'var') && ~isempty(arena_clicks)
+%         arena_indices = false(size(position.time_s));
+%         for j = 1:size(arena_clicks, 1)
+%             start_time = min(arena_clicks(j,:));
+%             end_time = max(arena_clicks(j,:));
+%             arena_indices = arena_indices | (position.time_s >= start_time & position.time_s <= end_time & position.in_arena);
+%         end
+%         new_position_struct(i).position.cropped.arena.indices = find(arena_indices);
+%         new_position_struct(i).position.cropped.arena.timestamps = position.time_s(arena_indices);
+%         new_position_struct(i).position.cropped.arena.click_ranges = arena_clicks;
+%         all_clicks_times = [all_clicks_times; arena_clicks(:)];
+%         fprintf('✓ Openfield data stored: %d indices\n', length(find(arena_indices)));
+%     end
+% 
+%     % Store the full experiment duration based on clicks
+%     if ~isempty(all_clicks_times)
+%         new_position_struct(i).position.cropped.session_duration_s = max(all_clicks_times) - min(all_clicks_times);
+%         new_position_struct(i).position.cropped.session_start_time = min(all_clicks_times);
+%         new_position_struct(i).position.cropped.session_end_time = max(all_clicks_times);
+%     else
+%         new_position_struct(i).position.cropped.session_duration_s = NaN;
+%         new_position_struct(i).position.cropped.session_start_time = NaN;
+%         new_position_struct(i).position.cropped.session_end_time = NaN;
+%         fprintf('⚠ No clicks recorded - session duration set to NaN\n');
+%     end
+%     fprintf('✓ Session %d cropped with organized structure.\n\n', i);
+%     close(fig); % Close the figure before the next session
+% end
+% disp('All sessions processed with organized cropped structure.');
+% end
+% 
+% function clicks = get_clicks(prompt_text, fig_handle)
+%     % Helper function to get clicks with undo/reset functionality.
+% 
+%     % Save old titles and set new ones for user guidance
+%     subplot(2,1,1);
+%     old_title_x = get(gca, 'Title');
+%     old_title_y = get(subplot(2,1,2), 'Title');
+%     set(get(gca, 'Title'), 'String', prompt_text);
+%     set(get(subplot(2,1,2), 'Title'), 'String', prompt_text);
+% 
+%     % Initialize click storage and line handle storage
+%     clicks = [];
+%     click_handles = {}; % Store handles in a cell array for each click pair
+% 
+%     % Get clicks one at a time and listen for key presses
+%     while true
+%         [x, ~, button] = ginput(1); % Get a single click or keypress
+% 
+%         if isempty(button)
+%             % This is a key press
+%             key_press = get(fig_handle, 'CurrentCharacter');
+% 
+%             switch lower(key_press)
+%                 case 'z' % Undo last click pair
+%                     if ~isempty(clicks)
+%                         clicks(end,:) = []; % Remove last click pair
+%                         fprintf('  -- Undid last click pair.\n');
+% 
+%                         % Delete the last two plotted lines
+%                         if ~isempty(click_handles)
+%                             delete([click_handles{end}]);
+%                             click_handles(end) = [];
+%                         end
+%                     else
+%                         fprintf('  -- No clicks to undo.\n');
+%                     end
+% 
+%                 case 'r' % Reset all clicks
+%                     clicks = [];
+%                     fprintf('  -- Resetting all clicks.\n');
+% 
+%                     % Delete all plotted lines
+%                     if ~isempty(click_handles)
+%                         cellfun(@delete, click_handles);
+%                         click_handles = {};
+%                     end
+% 
+%                 case char(13) % Enter key (ASCII 13)
+%                     % Exit the loop
+%                     break;
+% 
+%                 otherwise
+%                     fprintf('  -- Unrecognized key. Please use Z, R, or Enter.\n');
+%             end
+%         elseif button == 1 % Left mouse button click
+%             if mod(size(clicks, 1), 2) == 0 % An even number of clicks (ready for a start time)
+%                 clicks = [clicks; x, 0];
+%                 fprintf('  -- Start time selected: %.2f s\n', x);
+% 
+%                 % Plot a vertical green line at the clicked x-position
+%                 subplot(2,1,1);
+%                 h1 = xline(x, 'g--');
+% 
+%                 subplot(2,1,2);
+%                 h2 = xline(x, 'g--');
+%                 click_handles = [click_handles, {[h1, h2]}]; % Store a pair of handles
+% 
+%             else % An odd number of clicks (ready for an end time)
+%                 clicks(end, 2) = x;
+%                 fprintf('  -- End time selected: %.2f s\n', x);
+% 
+%                 % Plot a vertical green line at the clicked x-position
+%                 subplot(2,1,1);
+%                 h1 = xline(x, 'g--');
+% 
+%                 subplot(2,1,2);
+%                 h2 = xline(x, 'g--');
+%                 click_handles = [click_handles, {[h1, h2]}]; % Store a pair of handles
+%             end
+%         end
+%     end
+% 
+%     % Restore original titles and hold state
+%     set(get(subplot(2,1,1), 'Title'), 'String', old_title_x.String);
+%     set(get(subplot(2,1,2), 'Title'), 'String', old_title_y.String);
+%     hold off;
+% end
