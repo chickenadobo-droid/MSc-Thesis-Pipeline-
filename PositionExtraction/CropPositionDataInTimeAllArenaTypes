@@ -378,3 +378,469 @@ fprintf('Processed a total of %d experiments.\n', processed_count);
 %     set(get(subplot(2,1,2), 'Title'), 'String', old_title_y.String);
 %     hold off;
 % end
+
+
+%% Final Checks:
+
+%% Check output is correct
+
+% SCRIPT TO VERIFY THE INTERACTIVE CROPPING
+% This script loads a single 'position_extracted_rwm_croppedintimefinal.mat'
+% file and creates a plot to visually confirm that the cropping was successful.
+
+clear;
+clc;
+close all;
+
+% --- Step 1: User selects the file to check ---
+[fileName, pathName] = uigetfile('*.mat', 'Select a cropped position file to verify');
+
+% Check if the user cancelled the selection
+if isequal(fileName, 0)
+    disp('User selected Cancel. Script terminated.');
+    return;
+end
+filePath = fullfile(pathName, fileName);
+
+% --- Step 2: Load the data ---
+fprintf('Loading data from: %s\n', fileName);
+try
+    loaded_data = load(filePath, 'position');
+    position = loaded_data.position;
+catch ME
+    error('Could not load the "position" struct from the file. Error: %s', ME.message);
+end
+
+% --- Step 3: Command Window Sanity Checks ---
+disp('--- Verifying Structure and Metadata ---');
+
+% Check for the main 'cropped' field
+if ~isfield(position, 'cropped')
+    error('VERIFICATION FAILED: The "cropped" field does not exist!');
+else
+    fprintf('✓ "cropped" field exists.\n');
+end
+
+% Display session info
+fprintf('Arena Type: %s\n', position.ArenaType);
+fprintf('Session Duration (Cropped): %.2f seconds\n', position.cropped.session_duration_s);
+if isfield(position, 'track_exposures')
+    fprintf('Track Exposures Found: %d\n', position.track_exposures);
+end
+if isfield(position, 'sleepbox_exposures')
+    fprintf('Sleepbox Exposures Found: %d\n', position.sleepbox_exposures);
+end
+if isfield(position, 'arena_exposures')
+    fprintf('Arena Exposures Found: %d\n', position.arena_exposures);
+end
+
+disp('-----------------------------------------');
+
+
+% --- Step 4: Visual Verification Plot ---
+fig = figure('Name', ['Verification Plot: ' fileName], 'NumberTitle', 'off');
+
+% Plot X-Position Data
+subplot(2, 1, 1);
+% Plot the original, full data trace in light grey
+plot(position.time_s, position.x_px, 'Color', [0.8 0.8 0.8], 'DisplayName', 'Original Full Session');
+hold on;
+title('X-Position Verification');
+xlabel('Time (s)');
+ylabel('X Position (px)');
+grid on;
+
+% Plot Y-Position Data
+subplot(2, 1, 2);
+% Plot the original, full data trace in light grey
+plot(position.time_s, position.y_px, 'Color', [0.8 0.8 0.8], 'DisplayName', 'Original Full Session');
+hold on;
+title('Y-Position Verification');
+xlabel('Time (s)');
+ylabel('Y Position (px)');
+grid on;
+
+% Now, overlay the cropped data and click ranges
+legend_handles = []; % To build a clean legend
+
+% Check for and plot TRACK data
+if isfield(position.cropped, 'track') && ~isempty(position.cropped.track.indices)
+    % On X-plot
+    subplot(2,1,1);
+    h = plot(position.cropped.track.timestamps, position.x_px(position.cropped.track.indices), '.b', 'DisplayName', 'Cropped Track');
+    legend_handles = [legend_handles, h];
+    % On Y-plot
+    subplot(2,1,2);
+    plot(position.cropped.track.timestamps, position.y_px(position.cropped.track.indices), '.b');
+    % Draw click range lines on both plots
+    for k = 1:size(position.cropped.track.click_ranges, 1)
+       subplot(2,1,1); xline(position.cropped.track.click_ranges(k,:), 'g--', 'LineWidth', 1.5);
+       subplot(2,1,2); xline(position.cropped.track.click_ranges(k,:), 'g--', 'LineWidth', 1.5);
+    end
+end
+
+% Check for and plot SLEEPBOX data
+if isfield(position.cropped, 'sleepbox') && ~isempty(position.cropped.sleepbox.indices)
+    % On X-plot
+    subplot(2,1,1);
+    h = plot(position.cropped.sleepbox.timestamps, position.x_px(position.cropped.sleepbox.indices), '.r', 'DisplayName', 'Cropped Sleepbox');
+    legend_handles = [legend_handles, h];
+    % On Y-plot
+    subplot(2,1,2);
+    plot(position.cropped.sleepbox.timestamps, position.y_px(position.cropped.sleepbox.indices), '.r');
+    % Draw click range lines on both plots
+    for k = 1:size(position.cropped.sleepbox.click_ranges, 1)
+       subplot(2,1,1); xline(position.cropped.sleepbox.click_ranges(k,:), 'g--', 'LineWidth', 1.5);
+       subplot(2,1,2); xline(position.cropped.sleepbox.click_ranges(k,:), 'g--', 'LineWidth', 1.5);
+    end
+end
+
+% Check for and plot ARENA data
+if isfield(position.cropped, 'arena') && ~isempty(position.cropped.arena.indices)
+    % On X-plot
+    subplot(2,1,1);
+    h = plot(position.cropped.arena.timestamps, position.x_px(position.cropped.arena.indices), '.k', 'DisplayName', 'Cropped Arena');
+    legend_handles = [legend_handles, h];
+    % On Y-plot
+    subplot(2,1,2);
+    plot(position.cropped.arena.timestamps, position.y_px(position.cropped.arena.indices), '.k');
+    % Draw click range lines on both plots
+    for k = 1:size(position.cropped.arena.click_ranges, 1)
+       subplot(2,1,1); xline(position.cropped.arena.click_ranges(k,:), 'g--', 'LineWidth', 1.5);
+       subplot(2,1,2); xline(position.cropped.arena.click_ranges(k,:), 'g--', 'LineWidth', 1.5);
+    end
+end
+
+% Add legends
+subplot(2,1,1);
+legend(legend_handles, 'Location', 'best');
+subplot(2,1,2);
+legend(legend_handles, 'Location', 'best');
+
+fprintf('\n✓ Verification plot generated. Check the figure window.\n');
+
+% SCRIPT TO RE-CROP A SINGLE EXPERIMENT (FINAL CORRECTED VERSION)
+% This version fixes the "Index exceeds array bounds" error that occurred
+% on the first click.
+
+clear;
+clc;
+close all;
+
+% --- Step 1: User selects the source .mat file to re-process ---
+fprintf('Please select the ORIGINAL source file (...renamedwithmasks.mat)\n');
+[sourceFileName, sourcePathName] = uigetfile('*renamedwithmasks.mat', 'Select the SOURCE file to re-crop');
+
+% Check if the user cancelled the selection
+if isequal(sourceFileName, 0)
+    disp('User selected Cancel. Script terminated.');
+    return;
+end
+source_file_path = fullfile(sourcePathName, sourceFileName);
+
+fprintf('Loading position data from: %s\n', source_file_path);
+
+try
+    % --- Step 2: Load the position struct ---
+    loaded_data = load(source_file_path, 'position');
+    position = loaded_data.position;
+    
+    sessions_to_process = struct();
+    sessions_to_process.position = position;
+    
+    fprintf('Calling interactive cropping function...\n');
+    
+    % --- Step 3: Call the interactive cropping function ---
+    cropped_sessions = crop_in_time_interactive_final_v3(sessions_to_process);
+    
+    position_cropped_data = cropped_sessions(1).position;
+    
+    if isfield(position_cropped_data, 'cropped')
+        fprintf('✓ SUCCESS! Cropped structure created for this session.\n');
+        
+        % --- Step 4: Add exposure counts and save ---
+        if isfield(position_cropped_data.cropped, 'track')
+            position_cropped_data.track_exposures = size(position_cropped_data.cropped.track.click_ranges, 1);
+        else
+            position_cropped_data.track_exposures = 0;
+        end
+        if isfield(position_cropped_data.cropped, 'sleepbox')
+            position_cropped_data.sleepbox_exposures = size(position_cropped_data.cropped.sleepbox.click_ranges, 1);
+        else
+            position_cropped_data.sleepbox_exposures = 0;
+        end
+        if isfield(position_cropped_data.cropped, 'arena')
+            position_cropped_data.arena_exposures = size(position_cropped_data.cropped.arena.click_ranges, 1);
+        else
+            position_cropped_data.arena_exposures = 0;
+        end
+        
+        save_path = fullfile(sourcePathName, 'position_extracted_rwm_croppedintimefinal.mat');
+        
+        position = position_cropped_data;
+        save(save_path, 'position');
+        
+        fprintf('✓ New cropped data has overwritten the old file at: %s\n', save_path);
+        
+    else
+        fprintf('✗ ERROR: Cropped field was not created. The file was not saved.\n');
+    end
+catch ME
+    fprintf('✗ An error occurred: %s\n', ME.message);
+    fprintf('  Error in function %s, line %d.\n', ME.stack(1).name, ME.stack(1).line);
+end
+
+%% Full Sanity Check
+
+% SCRIPT FOR FINAL AUTOMATED SANITY CHECK (v2)
+% This script loops through all processed experiments and checks the integrity
+% and logical consistency of the saved files.
+% VERSION 2: Correctly includes 'arena_exposures' in its total count.
+
+clc;
+clear;
+close all;
+
+% --- Set the root path containing all animal folders ---
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+
+fprintf('--- Starting Final Sanity Check (v2) ---\n');
+fprintf('Root Directory: %s\n\n', data_root_path);
+
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir]);
+animal_folders = animal_folders(~ismember({animal_folders.name},{'.','..'}));
+
+files_checked = 0;
+issues_found = 0;
+summary_report = {};
+
+% --- Loop through all animals and experiments ---
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir]);
+    experiment_folders = experiment_folders(~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        current_experiment_path = fullfile(current_animal_path, experiment_folders(i).name);
+        
+        cropped_file_path = fullfile(current_experiment_path, 'position_extracted_rwm_croppedintimefinal.mat');
+        
+        if exist(cropped_file_path, 'file')
+            files_checked = files_checked + 1;
+            
+            try
+                data = load(cropped_file_path, 'position');
+                position = data.position;
+                
+                % --- PERFORM CHECKS ---
+                has_issue = false;
+                
+                % Check 1: Does the 'cropped' field exist?
+                if ~isfield(position, 'cropped')
+                    has_issue = true;
+                    summary_report{end+1} = sprintf('FAIL: %s - Missing ".cropped" field.', experiment_folders(i).name);
+                end
+                
+                % Check 2: Are exposure counts and duration logical?
+                total_exposures = 0;
+                if isfield(position, 'track_exposures')
+                    total_exposures = total_exposures + position.track_exposures;
+                end
+                if isfield(position, 'sleepbox_exposures')
+                    total_exposures = total_exposures + position.sleepbox_exposures;
+                end
+                % *** THIS IS THE FIX ***
+                if isfield(position, 'arena_exposures')
+                    total_exposures = total_exposures + position.arena_exposures;
+                end
+                
+                duration = position.cropped.session_duration_s;
+                
+                % If exposures exist, duration should be a positive number.
+                if total_exposures > 0 && (isnan(duration) || duration <= 0)
+                    has_issue = true;
+                    summary_report{end+1} = sprintf('FAIL: %s - Has %d exposures but duration is invalid (%.2f s).', ...
+                        experiment_folders(i).name, total_exposures, duration);
+                end
+                
+                % If no exposures, duration should be NaN.
+                if total_exposures == 0 && ~isnan(duration)
+                     has_issue = true;
+                     summary_report{end+1} = sprintf('FAIL: %s - Has 0 exposures but duration is not NaN (%.2f s).', ...
+                        experiment_folders(i).name, duration);
+                end
+                
+                if has_issue
+                    issues_found = issues_found + 1;
+                end
+                
+            catch ME
+                issues_found = issues_found + 1;
+                summary_report{end+1} = sprintf('FAIL: %s - Could not load or read file. Error: %s', experiment_folders(i).name, ME.message);
+            end
+        end
+    end
+end
+
+% --- Print Final Report ---
+fprintf('\n--- Sanity Check Complete ---\n');
+fprintf('Checked a total of %d files.\n', files_checked);
+
+if issues_found == 0
+    fprintf('\n✅ ✅ ✅ ALL CLEAR! No issues found. ✅ ✅ ✅\n');
+    fprintf('You can be confident moving on to the next stage of your analysis.\n');
+else
+    fprintf('\n❗ ❗ ❗ Found %d potential issue(s) ❗ ❗ ❗\n\n', issues_found);
+    for k = 1:length(summary_report)
+        fprintf('%s\n', summary_report{k});
+    end
+    fprintf('\nPlease review the files listed above.\n');
+end
+
+%% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%                   FINAL HELPER FUNCTIONS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function [new_position_struct] = crop_in_time_interactive_final_v3(sessions)
+% Final robust version of the cropping function.
+num_sessions = length(sessions);
+new_position_struct = sessions;
+
+for i = 1:num_sessions
+    position = sessions(i).position;
+    fprintf('Processing Session %d of %d (Arena Type: %s)...\n', i, num_sessions, position.ArenaType);
+    fig = figure('Name', ['Session ' num2str(i) ': Interactive Cropping'], 'WindowState', 'maximized');
+
+    switch position.ArenaType
+        case {'Mixed (Sleepbox + Track)'}
+            % Plot initial data for the first selection (Track)
+            subplot(2,1,1);
+            plot(position.time_s(position.in_track), position.x_px(position.in_track), 'b', 'DisplayName', 'Track'); hold on;
+            plot(position.time_s(position.in_sleepbox), position.x_px(position.in_sleepbox), 'r', 'DisplayName', 'Sleepbox');
+            title('X Position'); xlabel('Time (s)'); ylabel('X (px)'); legend;
+
+            subplot(2,1,2);
+            plot(position.time_s(position.in_track), position.y_px(position.in_track), 'b'); hold on;
+            plot(position.time_s(position.in_sleepbox), position.y_px(position.in_sleepbox), 'r');
+            title('Y Position'); xlabel('Time (s)'); ylabel('Y (px)');
+
+            track_clicks = get_clicks_v3('Select start/end for TRACK. Z:undo, R:reset, Enter:finish.', fig);
+            
+            % Clear and replot for the second selection (Sleepbox)
+            subplot(2,1,1); cla;
+            plot(position.time_s(position.in_track), position.x_px(position.in_track), 'b', 'DisplayName', 'Track'); hold on;
+            plot(position.time_s(position.in_sleepbox), position.x_px(position.in_sleepbox), 'r', 'DisplayName', 'Sleepbox');
+            title('X Position'); xlabel('Time (s)'); ylabel('X (px)'); legend;
+
+            subplot(2,1,2); cla;
+            plot(position.time_s(position.in_track), position.y_px(position.in_track), 'b'); hold on;
+            plot(position.time_s(position.in_sleepbox), position.y_px(position.in_sleepbox), 'r');
+            title('Y Position'); xlabel('Time (s)'); ylabel('Y (px)');
+            
+            sleepbox_clicks = get_clicks_v3('Select start/end for SLEEPBOX. Z:undo, R:reset, Enter:finish.', fig);
+
+        otherwise
+             error('ArenaType %s not fully implemented in this script. Please add as needed.', position.ArenaType);
+    end
+    
+    new_position_struct(i).position.cropped = struct();
+    all_clicks_times = [];
+    
+    if ~isempty(track_clicks)
+        indices = false(size(position.time_s));
+        for j = 1:size(track_clicks, 1)
+            start_time = min(track_clicks(j,:)); end_time = max(track_clicks(j,:));
+            indices = indices | (position.time_s >= start_time & position.time_s <= end_time & position.in_track);
+        end
+        new_position_struct(i).position.cropped.track.indices = find(indices);
+        new_position_struct(i).position.cropped.track.timestamps = position.time_s(indices);
+        new_position_struct(i).position.cropped.track.click_ranges = track_clicks;
+        all_clicks_times = [all_clicks_times; track_clicks(:)];
+    end
+    
+    if ~isempty(sleepbox_clicks)
+        indices = false(size(position.time_s));
+        for j = 1:size(sleepbox_clicks, 1)
+            start_time = min(sleepbox_clicks(j,:)); end_time = max(sleepbox_clicks(j,:));
+            indices = indices | (position.time_s >= start_time & position.time_s <= end_time & position.in_sleepbox);
+        end
+        new_position_struct(i).position.cropped.sleepbox.indices = find(indices);
+        new_position_struct(i).position.cropped.sleepbox.timestamps = position.time_s(indices);
+        new_position_struct(i).position.cropped.sleepbox.click_ranges = sleepbox_clicks;
+        all_clicks_times = [all_clicks_times; sleepbox_clicks(:)];
+    end
+
+    if ~isempty(all_clicks_times)
+        new_position_struct(i).position.cropped.session_duration_s = max(all_clicks_times) - min(all_clicks_times);
+    else
+        new_position_struct(i).position.cropped.session_duration_s = NaN;
+    end
+    
+    close(fig);
+end
+end
+
+function clicks = get_clicks_v3(prompt_text, fig_handle)
+    % Final robust version of get_clicks, fixes the initial click error.
+    subplot(2,1,1); old_title_x = get(gca, 'Title');
+    subplot(2,1,2); old_title_y = get(gca, 'Title');
+    subplot(2,1,1); title(prompt_text);
+    subplot(2,1,2); title(prompt_text);
+
+    clicks = [];
+    click_handles = {};
+
+    while true
+        [x, ~, button] = ginput(1);
+        if isempty(button) % Key press
+            key = get(fig_handle, 'CurrentCharacter');
+            switch lower(key)
+                case 'z' % Undo
+                    if ~isempty(clicks)
+                        clicks(end,:) = [];
+                        if ~isempty(click_handles)
+                            delete(click_handles{end});
+                            click_handles(end) = [];
+                        end
+                        fprintf('  -- Undid last click pair.\n');
+                    else
+                        fprintf('  -- No clicks to undo.\n');
+                    end
+                case 'r' % Reset
+                    clicks = [];
+                    if ~isempty(click_handles)
+                        cellfun(@delete, click_handles);
+                    end
+                    click_handles = {};
+                    fprintf('  -- Resetting all clicks.\n');
+                case char(13) % Enter
+                    break;
+            end
+        elseif button == 1 % Mouse click
+            % *** THIS IS THE CORRECTED LOGIC ***
+            % It checks if clicks is empty first, preventing the error.
+            if isempty(clicks) || (size(clicks, 2) == 2 && clicks(end, 2) ~= 0)
+                % Condition for a START click:
+                % 1. The clicks matrix is empty OR
+                % 2. The last row is complete (end time is not 0)
+                clicks = [clicks; x, 0];
+                fprintf('  -- Start time: %.2f s\n', x);
+                subplot(2,1,1); h1 = xline(x, 'g--');
+                subplot(2,1,2); h2 = xline(x, 'g--');
+                click_handles{end+1} = [h1, h2];
+            else
+                % Condition for an END click
+                clicks(end, 2) = x;
+                fprintf('  -- End time:   %.2f s\n', x);
+                subplot(2,1,1); h1 = xline(x, 'g--');
+                subplot(2,1,2); h2 = xline(x, 'g--');
+                % Add the new line handles to the last existing group
+                click_handles{end} = [click_handles{end}, h1, h2];
+            end
+        end
+    end
+    title(subplot(2,1,1), old_title_x.String);
+    title(subplot(2,1,2), old_title_y.String);
+end
