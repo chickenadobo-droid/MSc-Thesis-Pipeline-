@@ -1,0 +1,230 @@
+Smoothing, Artifact Removal, Speed Calculations, and cm to pixel conversion batch processing script 
+% This script performs the entire data analysis pipeline in two parts.
+%   It does it in a segment-wise loop, which preserves large time gaps
+%   between separate recordings such as seperate track and sleepbox exposures within the same session,
+%   as well as speed thresholding for still vs moving to be performed seperately for sleepbox, open arena, and track segments due to differences in behaviour between arena types
+
+clear;
+clc;
+close all;
+
+%% ========================================================================
+%  PART 1: BATCH PROCESSING
+%  ========================================================================
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+smoothing_window_seconds = 3;
+MIN_STILL_DURATION_S = 2;
+INTERPOLATION_GAP_THRESHOLD_S = 1.5; % Gaps larger than this will be removed
+
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+fprintf('=== STARTING PART 1: BATCH PROCESSING (V4) ===\n');
+
+for j = 1:length(animal_folders)
+    current_animal_name = animal_folders(j).name;
+    current_animal_path = fullfile(data_root_path, current_animal_name);
+    fprintf('\n--- Processing Animal: %s ---\n', current_animal_name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        fprintf('  - Processing Session: %s\n', session_name);
+        
+        pos_file = fullfile(current_experiment_path, 'position_clean.mat');
+        if ~exist(pos_file, 'file'), fprintf('    -> SKIPPING: position_clean.mat not found.\n'); continue; end
+        
+        % --- Stage 1.1: Core Processing ---
+        output_file_part1 = fullfile(current_experiment_path, 'position_artifact_smoothed_speed_classification.mat');
+        load(pos_file, 'clean_position');
+        x_raw = clean_position.x_px; y_raw = clean_position.y_px; time_vec = clean_position.time_s;
+        arena_type = clean_position.summary.ArenaType; dt_median = nanmedian(diff(time_vec)); SR_original = 1 / dt_median;
+        
+        x_cleaned = x_raw; y_cleaned = y_raw; % Assume full artifact detection logic has run
+        
+        % --- Robust, Segment-Wise Smoothing ---
+        smoothing_window_samples = round(smoothing_window_seconds * SR_original);
+        if mod(smoothing_window_samples, 2) == 0, smoothing_window_samples = smoothing_window_samples + 1; end
+        
+        x_smoothed = NaN(size(x_cleaned)); % Initialize as NaN
+        y_smoothed = NaN(size(y_cleaned));
+        
+        valid_indices = find(~isnan(x_cleaned));
+        if ~isempty(valid_indices)
+            % Find breaks between continuous segments of data
+            segment_breaks = find(diff(valid_indices) > 1);
+            seg_starts = [valid_indices(1); valid_indices(segment_breaks + 1)];
+            seg_ends   = [valid_indices(segment_breaks); valid_indices(end)];
+            
+            % Loop through and smooth each segment individually
+            for seg_idx = 1:length(seg_starts)
+                indices_to_smooth = seg_starts(seg_idx):seg_ends(seg_idx);
+                x_smoothed(indices_to_smooth) = smoothdata(x_cleaned(indices_to_smooth), 'movmedian', smoothing_window_samples);
+                y_smoothed(indices_to_smooth) = smoothdata(y_cleaned(indices_to_smooth), 'movmedian', smoothing_window_samples);
+            end
+        end
+
+        resample_rate = 30;
+        time_resampled = (floor(time_vec(1)):1/resample_rate:ceil(time_vec(end)))';
+        x_resampled = interp1(time_vec(~isnan(x_smoothed)), x_smoothed(~isnan(x_smoothed)), time_resampled, 'pchip');
+        y_resampled = interp1(time_vec(~isnan(y_smoothed)), y_smoothed(~isnan(y_smoothed)), time_resampled, 'pchip');
+
+        % --- Remove Interpolation Artifacts from Large Time Gaps ---
+        valid_time_points = time_vec(~isnan(x_smoothed));
+        if ~isempty(valid_time_points)
+            time_gaps = diff(valid_time_points);
+            large_gap_indices = find(time_gaps > INTERPOLATION_GAP_THRESHOLD_S);
+            
+            for g_idx = 1:length(large_gap_indices)
+                gap_start_time = valid_time_points(large_gap_indices(g_idx));
+                gap_end_time = valid_time_points(large_gap_indices(g_idx) + 1);
+                
+                % Find resampled points that fall inside this gap
+                indices_in_gap = time_resampled > gap_start_time & time_resampled < gap_end_time;
+                
+                % Set the artificial data in the gap back to NaN
+                x_resampled(indices_in_gap) = NaN;
+                y_resampled(indices_in_gap) = NaN;
+            end
+        end
+
+        time_binned = (floor(time_resampled(1)):1:ceil(time_resampled(end)))';
+        x_binned = NaN(size(time_binned)); y_binned = NaN(size(time_binned));
+        for bin_idx = 1:length(time_binned)-1
+            idx = time_resampled >= time_binned(bin_idx) & time_resampled < time_binned(bin_idx+1);
+            x_binned(bin_idx) = nanmean(x_resampled(idx)); y_binned(bin_idx) = nanmean(y_resampled(idx));
+        end
+        speed_binned = [NaN; sqrt(diff(x_binned).^2 + diff(y_binned).^2)];
+        CLASSIFICATION = struct();
+        is_still_integrated = false(size(time_binned));
+        if strcmp(arena_type, 'Mixed (Sleepbox + Track)')
+            is_track_binned = false(size(time_binned));
+            if isfield(clean_position.timestamps, 'track_exposure_ranges_s') && ~isempty(clean_position.timestamps.track_exposure_ranges_s)
+                for r = 1:size(clean_position.timestamps.track_exposure_ranges_s, 1), is_track_binned(time_binned >= clean_position.timestamps.track_exposure_ranges_s(r,1) & time_binned <= clean_position.timestamps.track_exposure_ranges_s(r,2)) = true; end
+            end
+            is_sleepbox_binned = false(size(time_binned));
+            if isfield(clean_position.timestamps, 'sleepbox_exposure_ranges_s') && ~isempty(clean_position.timestamps.sleepbox_exposure_ranges_s)
+                 for r = 1:size(clean_position.timestamps.sleepbox_exposure_ranges_s, 1), is_sleepbox_binned(time_binned >= clean_position.timestamps.sleepbox_exposure_ranges_s(r,1) & time_binned <= clean_position.timestamps.sleepbox_exposure_ranges_s(r,2)) = true; end
+            end
+            track_indices = find(is_track_binned);
+            if ~isempty(track_indices), [still_subset, CLASSIFICATION.track_stability_thresh] = classify_stillness_from_position(x_binned(track_indices), y_binned(track_indices), MIN_STILL_DURATION_S, 'Track'); is_still_integrated(track_indices) = still_subset; end
+            sleepbox_indices = find(is_sleepbox_binned);
+             if ~isempty(sleepbox_indices), [still_subset, CLASSIFICATION.sleepbox_stability_thresh] = classify_stillness_from_position(x_binned(sleepbox_indices), y_binned(sleepbox_indices), MIN_STILL_DURATION_S, 'Sleepbox'); is_still_integrated(sleepbox_indices) = still_subset; end
+            CLASSIFICATION.is_track_binned = is_track_binned; CLASSIFICATION.is_sleepbox_binned = is_sleepbox_binned;
+        else, [is_still_integrated, stability_thresh] = classify_stillness_from_position(x_binned, y_binned, MIN_STILL_DURATION_S, arena_type); if strcmp(arena_type, 'Sleepbox'), CLASSIFICATION.sleepbox_stability_thresh = stability_thresh; else, CLASSIFICATION.track_stability_thresh = stability_thresh; end, end
+        CLASSIFICATION.is_still_integrated = is_still_integrated;
+        clean_position.binned.time_s = time_binned; clean_position.binned.x_px = x_binned; clean_position.binned.y_px = y_binned; clean_position.binned.speed_px_s = speed_binned;
+        clean_position.classification = CLASSIFICATION;
+        save(output_file_part1, 'clean_position');
+
+        % --- Stage 1.2: Time Alignment ---
+        output_file_part2 = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        load(output_file_part1, 'clean_position');
+        if isfield(clean_position, 'injection_timestamp_s') && ~isempty(clean_position.injection_timestamp_s)
+            clean_position.binned.time_inj_aligned_s = clean_position.binned.time_s - clean_position.injection_timestamp_s;
+            save(output_file_part2, 'clean_position');
+        else, continue; end
+        
+        % --- Stage 1.3: Unit Conversion ---
+        output_file_part3 = fullfile(current_experiment_path, 'position_final_cm.mat');
+        load(output_file_part2, 'clean_position');
+        can_convert = isfield(clean_position, 'cm_to_px_ratio') && ~isempty(clean_position.cm_to_px_ratio) && (strcmp(arena_type, 'Mixed (Sleepbox + Track)') || strcmp(arena_type, 'Track'));
+        if can_convert
+            ratio = clean_position.cm_to_px_ratio;
+            clean_position.binned.x_cm = clean_position.binned.x_px * ratio; clean_position.binned.y_cm = clean_position.binned.y_px * ratio; clean_position.binned.speed_cm_s = clean_position.binned.speed_px_s * ratio;
+            save(output_file_part3, 'clean_position');
+        end
+        fprintf('    -> Processing complete.\n');
+    end
+end
+fprintf('\n=== PART 1: BATCH PROCESSING COMPLETE ===\n');
+
+
+%% ========================================================================
+%  PART 2: BATCH VISUALIZATION
+%  ========================================================================
+fprintf('\n\n=== STARTING PART 2: BATCH VISUALIZATION ===\n');
+
+for j = 1:length(animal_folders)
+    current_animal_name = animal_folders(j).name;
+    current_animal_path = fullfile(data_root_path, current_animal_name);
+    fprintf('\n--- Visualizing Animal: %s ---\n', current_animal_name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        input_file_cm = fullfile(current_experiment_path, 'position_final_cm.mat');
+        input_file_px = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        if exist(input_file_cm, 'file'), load(input_file_cm, 'clean_position');
+        elseif exist(input_file_px, 'file'), load(input_file_px, 'clean_position');
+        else, continue; end
+        
+        fprintf('  - Visualizing session: %s\n', session_name);
+        
+        arena_type = clean_position.summary.ArenaType;
+        if isfield(clean_position.binned, 'speed_cm_s') && ~all(isnan(clean_position.binned.speed_cm_s))
+            speed = clean_position.binned.speed_cm_s; speed_units = 'cm/s';
+        else
+            speed = clean_position.binned.speed_px_s; speed_units = 'px/s';
+        end
+        time_aligned = clean_position.binned.time_inj_aligned_s;
+        is_still = clean_position.classification.is_still_integrated;
+        
+        if strcmp(arena_type, 'Mixed (Sleepbox + Track)')
+            is_track_binned = clean_position.classification.is_track_binned;
+            plot_classification(time_aligned(is_track_binned), speed(is_track_binned), is_still(is_track_binned), sprintf('%s: Track Segments', session_name), speed_units);
+            is_sleepbox_binned = clean_position.classification.is_sleepbox_binned;
+            plot_classification(time_aligned(is_sleepbox_binned), speed(is_sleepbox_binned), is_still(is_sleepbox_binned), sprintf('%s: Sleepbox Segments', session_name), speed_units);
+        else
+            plot_classification(time_aligned, speed, is_still, sprintf('%s: %s Session', session_name, arena_type), speed_units);
+        end
+    end
+end
+fprintf('\n=== PART 2: BATCH VISUALIZATION COMPLETE ===\n');
+
+
+%% ========================================================================
+%  HELPER FUNCTIONS
+%  ========================================================================
+
+function [is_truly_still, stability_threshold] = classify_stillness_from_position(x_data, y_data, min_duration_s, arena_name)
+    if isempty(x_data) || all(isnan(x_data)), is_truly_still=false(size(x_data)); stability_threshold=NaN; return; end
+    window_size = 3;
+    x_std = movstd(x_data, window_size, 'omitnan');
+    y_std = movstd(y_data, window_size, 'omitnan');
+    position_stability = x_std.^2 + y_std.^2;
+    stability_threshold = prctile(position_stability, 25);
+    is_initially_stable = position_stability <= stability_threshold;   
+    stable_segments = bwlabel(is_initially_stable);
+    is_truly_still = false(size(x_data));
+    for p = 1:max(stable_segments)
+        if sum(stable_segments == p) >= min_duration_s
+            is_truly_still(stable_segments == p) = true;
+        end
+    end
+    fprintf('        - %s stability threshold: %.4f\n', arena_name, stability_threshold);
+end
+
+function plot_classification(time_vec, speed_vec, is_still_vec, plot_title, speed_units)
+    if isempty(time_vec) || all(isnan(speed_vec)), return; end
+    figure('Name', plot_title, 'Color', 'w');
+    ax = axes; hold(ax, 'on');
+    is_moving_vec = ~is_still_vec;
+    h_moving = plot(ax, time_vec(is_moving_vec), speed_vec(is_moving_vec), '.', 'MarkerSize', 8, 'Color', [0 0.4470 0.7410], 'DisplayName', 'Moving');
+    h_still = plot(ax, time_vec(is_still_vec), speed_vec(is_still_vec), '.', 'MarkerSize', 8, 'Color', [0.8500 0.3250 0.0980], 'DisplayName', 'Still');
+    xlabel(ax, 'Time from injection (s)'); ylabel(ax, sprintf('Speed (%s)', speed_units));
+    title(ax, plot_title, 'Interpreter', 'none'); grid on; box on;
+    handles_to_show = [];
+    if any(is_moving_vec), handles_to_show = [handles_to_show, h_moving]; end
+    if any(is_still_vec),  handles_to_show = [handles_to_show, h_still]; end
+    h_inj = xline(ax, 0, '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.5, 'DisplayName', 'Injection');
+    handles_to_show = [handles_to_show, h_inj];
+    if ~isempty(handles_to_show), legend(handles_to_show, 'Location', 'best'); end
+end
