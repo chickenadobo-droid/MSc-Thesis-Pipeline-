@@ -189,6 +189,255 @@ for j = 1:length(animal_folders)
 end
 fprintf('\n=== PART 2: BATCH VISUALIZATION COMPLETE ===\n');
 
+%% ---------------------------------------------------------------------------------------------------------------------------%
+% Visualisation of datapoints categorised as still overlayed on top of spatial track and sleepbox masks (for mixed sessions)  %
+% ----------------------------------------------------------------------------------------------------------------------------%
+
+%% Diagnostic Plots for Position Extraction 
+% 
+% 1. Plot track and sleepbox for one session
+
+figure;
+scatter(clean_position.binned.x_px(clean_position.classification.is_track_binned),clean_position.binned.y_px(clean_position.classification.is_track_binned));
+hold on;
+scatter(clean_position.binned.x_px(clean_position.classification.is_sleepbox_binned),clean_position.binned.y_px(clean_position.classification.is_sleepbox_binned));
+xlabel('X Position (pixels)')
+ylabel('Y Position (pixels)')
+legend('Track', 'Sleepbox')
+title('Extracted Position (Mixed Track and Sleepbox Session)')
+
+%% SCRIPT: debug_spatial_separation_with_stillness
+%
+% 2. Based on orignal 1-session script
+% Creates a 2D diagnostic plot (X vs. Y) for a single 'Mixed' session.
+% It shows the arena zones, the full path of the animal, and overlays
+% larger markers for all points where the animal was classified as 'Still'.
+
+clear;
+clc;
+close all;
+
+% --- 1. DEFINE THE SESSION TO DEBUG ---
+session_to_debug = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction\B5\mouseB5_VEHICLE_091512_day1\position_final_cm.mat'; %<-- CONFIRM THIS PATH
+
+% --- 2. Load and Check Data ---
+if ~exist(session_to_debug, 'file'), error('File not found: %s', session_to_debug); end
+fprintf('Loading data for debugging: %s\n', session_to_debug);
+load(session_to_debug, 'clean_position');
+[~, session_name] = fileparts(fileparts(session_to_debug));
+
+% Check for required data fields
+if ~strcmp(clean_position.summary.ArenaType, 'Mixed (Sleepbox + Track)'), error('This script is for "Mixed" sessions only.'); end
+if ~isfield(clean_position, 'coords'), error('Could not find coordinate data in `clean_position.coords`.'); end
+
+% --- 3. Extract Data for Plotting ---
+% Binned position data
+x_pos = clean_position.binned.x_px;
+y_pos = clean_position.binned.y_px;
+% Logical masks
+is_still = clean_position.classification.is_still_integrated;
+
+% Coordinate data for arena shapes
+track_outer_x = clean_position.coords.track_outer_poly(:, 1);
+track_outer_y = clean_position.coords.track_outer_poly(:, 2);
+track_inner_x = clean_position.coords.track_inner_poly(:, 1);
+track_inner_y = clean_position.coords.track_inner_poly(:, 2);
+circle_params = clean_position.coords.sleep_circle;
+center_x = circle_params(1);
+center_y = circle_params(2);
+radius = circle_params(3);
+
+% --- 4. Create the Diagnostic Plot ---
+figure('Name', ['Spatial Stillness Plot for ', session_name], 'Color', 'w', 'Position', [100, 100, 900, 800]);
+ax = axes;
+hold(ax, 'on');
+
+% 1. Draw the spatial zones as a lightly shaded background
+patch(ax, track_outer_x, track_outer_y, [0.8 0.9 1], 'FaceAlpha', 0.5, 'EdgeColor', 'none', 'DisplayName', 'Track Zone');
+patch(ax, track_inner_x, track_inner_y, 'w', 'FaceAlpha', 1, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+theta = linspace(0, 2*pi, 100);
+x_circle = radius * cos(theta) + center_x;
+y_circle = radius * sin(theta) + center_y;
+patch(ax, x_circle, y_circle, [1 0.8 0.8], 'FaceAlpha', 0.5, 'EdgeColor', 'none', 'DisplayName', 'Sleepbox Zone');
+
+% 2. Plot ALL data points as small, faint grey dots to show the full path
+plot(ax, x_pos, y_pos, '.', 'Color', [0.7 0.7 0.7], 'MarkerSize', 5, 'DisplayName', 'All Data Points');
+
+% 3. Overlay 'Still' points as larger, prominent orange dots
+still_indices = find(is_still);
+plot(ax, x_pos(still_indices), y_pos(still_indices), 'o', ...
+    'MarkerEdgeColor', 'k', ...
+    'MarkerFaceColor', [0.91, 0.41, 0.17], ...
+    'MarkerSize', 5, ...
+    'DisplayName', 'Still Points');
+
+% Formatting
+title(['Spatial Stillness Classification for ', session_name], 'Interpreter', 'none');
+xlabel('X Position (pixels)');
+ylabel('Y Position (pixels)');
+axis equal tight; grid on; box on;
+set(ax, 'YDir', 'reverse');
+legend('Location', 'best');
+fprintf('Spatial diagnostic plot with stillness overlay created.\n');
+
+%% =======================================================================
+%  Batch: Spatial Stillness Diagnostic Plots for all Mixed (Sleepbox + Track)
+%  - Scans PositionExtraction root for Mixed sessions
+%  - Loads clean_position struct (tries different filenames just incase)
+%  - Confirms ArenaType == 'Mixed (Sleepbox + Track)'
+%  - Plots arena shapes + full XY + overlay of 'Still' points
+% ========================================================================
+
+clear; clc; close all;
+
+% === 0) CONFIGURE ROOT PATHS (EDIT THESE TWO LINES IF NEEDED) ===========
+data_root = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+
+% Filenames to try (in this order) under each session folder:
+candidate_files = { ...
+    'position_final_cm.mat', ...
+    'position_a_s_sc_inj_aligned.mat'};
+
+% === 1) FIND ALL ANIMAL / SESSION FOLDERS ================================
+d_anim = dir(data_root);
+d_anim = d_anim([d_anim.isdir] & ~ismember({d_anim.name},{'.','..'}));
+
+n_plotted = 0; n_skipped = 0;
+
+for a = 1:numel(d_anim)
+    animal = d_anim(a).name;
+    p_animal = fullfile(data_root, animal);
+    d_sess = dir(p_animal);
+    d_sess = d_sess([d_sess.isdir] & ~ismember({d_sess.name},{'.','..'}));
+    
+    for s = 1:numel(d_sess)
+        sess = d_sess(s).name;
+        p_sess = fullfile(p_animal, sess);
+
+        % --- 2) Pick the first existing candidate file
+        in_path = '';
+        for k = 1:numel(candidate_files)
+            p_try = fullfile(p_sess, candidate_files{k});
+            if exist(p_try,'file')
+                in_path = p_try;
+                break;
+            end
+        end
+        if isempty(in_path)
+            fprintf('[-] No clean_position file found in %s\n', p_sess);
+            n_skipped = n_skipped + 1;
+            continue;
+        end
+
+        % --- 3) Load clean_position
+        S = load(in_path);
+        if ~isfield(S,'clean_position')
+            fprintf('[-] %s does not contain clean_position\n', in_path);
+            n_skipped = n_skipped + 1;
+            continue;
+        end
+        cp = S.clean_position;
+
+        % --- 4) Check ArenaType
+        if ~isfield(cp,'summary') || ~isfield(cp.summary,'ArenaType') ...
+                || ~strcmp(cp.summary.ArenaType, 'Mixed (Sleepbox + Track)')
+            fprintf('[.] Skipping non-Mixed session: %s/%s\n', animal, sess);
+            n_skipped = n_skipped + 1;
+            continue;
+        end
+
+        % --- 5) Coords presence check
+        if ~isfield(cp,'coords') || ~all(isfield(cp.coords, {'track_outer_poly','track_inner_poly','sleep_circle'}))
+            fprintf('[-] Missing coords in %s/%s — no plot.\n', animal, sess);
+            n_skipped = n_skipped + 1;
+            continue;
+        end
+
+        % --- 6) Choose XY source (binned preferred, else resampled, else native)
+        x_pos = []; y_pos = [];
+        if isfield(cp,'binned') && all(isfield(cp.binned, {'x_px','y_px'}))
+            x_pos = cp.binned.x_px(:); y_pos = cp.binned.y_px(:);
+        elseif isfield(cp,'resampled') && all(isfield(cp.resampled, {'x_px','y_px'}))
+            x_pos = cp.resampled.x_px(:); y_pos = cp.resampled.y_px(:);
+        else
+            % fallback to raw clean_position timebase
+            if all(isfield(cp, {'x_px','y_px'}))
+                x_pos = cp.x_px(:); y_pos = cp.y_px(:);
+            end
+        end
+
+        if isempty(x_pos) || isempty(y_pos)
+            fprintf('[-] No XY found for %s/%s — no plot.\n', animal, sess);
+            n_skipped = n_skipped + 1;
+            continue;
+        end
+
+        % --- 7) Stillness mask (optional)
+        is_still = [];
+        if isfield(cp,'classification') && isfield(cp.classification,'is_still_integrated')
+            is_still = logical(cp.classification.is_still_integrated(:));
+            if numel(is_still) ~= numel(x_pos)
+                % length mismatch: clamp to min length
+                L = min(numel(is_still), numel(x_pos));
+                is_still = is_still(1:L);
+                x_pos = x_pos(1:L);
+                y_pos = y_pos(1:L);
+            end
+        else
+            % If missing, just show path and zones (no still overlay)
+            is_still = false(size(x_pos));
+        end
+
+        % --- 8) Extract arena shapes
+        track_outer_x = cp.coords.track_outer_poly(:,1);
+        track_outer_y = cp.coords.track_outer_poly(:,2);
+        track_inner_x = cp.coords.track_inner_poly(:,1);
+        track_inner_y = cp.coords.track_inner_poly(:,2);
+        circle_params = cp.coords.sleep_circle;  % [cx, cy, r]
+        cx = circle_params(1); cy = circle_params(2); r = circle_params(3);
+        th = linspace(0,2*pi,100);
+        x_circ = r*cos(th)+cx;  y_circ = r*sin(th)+cy;
+
+        % --- 9) PLOT
+        f = figure('Name', sprintf('Spatial Stillness: %s/%s', animal, sess), ...
+                   'Color','w','Position',[100 100 980 880]);
+        ax = axes(f); hold(ax,'on');
+
+        % background zones
+        patch(ax, track_outer_x, track_outer_y, [0.8 0.9 1], 'FaceAlpha', 0.5, ...
+              'EdgeColor', 'none', 'DisplayName', 'Track Zone');
+        patch(ax, track_inner_x, track_inner_y, 'w', 'FaceAlpha', 1, ...
+              'EdgeColor', 'none', 'HandleVisibility','off');
+        patch(ax, x_circ, y_circ, [1 0.8 0.8], 'FaceAlpha', 0.5, ...
+              'EdgeColor', 'none', 'DisplayName', 'Sleepbox Zone');
+
+        % full path
+        plot(ax, x_pos, y_pos, '.', 'Color',[0.7 0.7 0.7], 'MarkerSize', 5, ...
+             'DisplayName','All Data Points');
+
+        % still overlay (only if any)
+        if any(is_still)
+            idxS = find(is_still);
+            plot(ax, x_pos(idxS), y_pos(idxS), 'o', ...
+                'MarkerEdgeColor','k', ...
+                'MarkerFaceColor',[0.91, 0.41, 0.17], ...
+                'MarkerSize', 5, ...
+                'DisplayName','Still Points');
+        end
+
+        % aesthetics
+        title(ax, sprintf('Spatial Stillness Classification: %s', strrep(sess,'_','\_')));
+        xlabel(ax,'X Position (pixels)'); ylabel(ax,'Y Position (pixels)');
+        axis(ax,'equal'); axis(ax,'tight'); grid(ax,'on'); box(ax,'on');
+        set(ax,'YDir','reverse');
+        legend(ax,'Location','best');
+    end
+end
+
+fprintf('\nDone. Plotted %d sessions, skipped %d.\n', n_plotted, n_skipped);
+
+
+
 
 %% ========================================================================
 %  HELPER FUNCTIONS
