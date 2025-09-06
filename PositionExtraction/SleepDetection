@@ -1,0 +1,355 @@
+% SCRIPT: detect_sleep
+%
+% PURPOSE:
+% This standalone script identifies periods of prolonged stillness, defined as
+% sleep, and saves the classification back into the data files.
+%
+% DEFINITION OF SLEEP:
+% A period is classified as 'sleep' if the animal is continuously 'still'
+% for >= 40 seconds.
+%
+% PROCESS:
+% 1. Iterates through all animal/experiment folders.
+% 2. Loads the final processed data file ('position_final_cm.mat' or fallback).
+% 3. Analyses the 'is_still_integrated' logical vector (when animal is
+%    still over the whole time series of experiment
+% 4. Creates a new logical vector 'is_sleep' of the same length
+% 5. Saves the updated 'clean_position' structure back to the .mat file
+
+clear;
+clc;
+close all;
+
+% --- 1. Configuration ---
+% Define the root path containing all your animal folders
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+
+% Define the minimum duration of continuous stillness to be classified as sleep (in seconds)
+MIN_SLEEP_DURATION_S = 40;
+
+fprintf('=== STARTING SLEEP DETECTION SCRIPT ===\n');
+fprintf('Minimum sleep duration set to: %d seconds\n', MIN_SLEEP_DURATION_S);
+
+% --- 2. Set Up Directory and Start Loop ---
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    fprintf('\n--- Processing Animal: %s ---\n', animal_folders(j).name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        % Define which file to load, prioritizing the one with cm data
+        input_file = fullfile(current_experiment_path, 'position_final_cm.mat');
+        if ~exist(input_file, 'file')
+            input_file = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        end
+        
+        if ~exist(input_file, 'file')
+            fprintf('  - Skipping "%s": no processed data file found.\n', session_name);
+            continue;
+        end
+        
+        fprintf('  - Analysing session: %s\n', session_name);
+        load(input_file, 'clean_position');
+        
+        % --- 3. Core Sleep Detection Logic ---
+        
+        % Check if the required stillness data exists
+        if ~isfield(clean_position, 'classification') || ~isfield(clean_position.classification, 'is_still_integrated')
+            fprintf('      -> WARNING: Skipping, `is_still_integrated` field not found.\n');
+            continue;
+        end
+        
+        is_still_vec = clean_position.classification.is_still_integrated;
+        
+        % Initialize the output vector with all zeros (false)
+        is_sleep = false(size(is_still_vec));
+        
+        % Find the start and end points of all consecutive 'still' periods
+        padded_vec = [0; is_still_vec(:); 0]; % Ensure column vector and pad with 0s
+        changes = diff(padded_vec);
+        run_starts = find(changes == 1);
+        run_ends = find(changes == -1);
+        run_lengths = run_ends - run_starts;
+        
+        % Find which of these runs meet our minimum sleep duration
+        long_run_indices = find(run_lengths >= MIN_SLEEP_DURATION_S);
+        
+        if isempty(long_run_indices)
+            fprintf('      -> No sleep periods detected.\n');
+        else
+            fprintf('      -> Detected %d potential sleep period(s).\n', length(long_run_indices));
+            
+            % For each detected sleep period, set the corresponding indices to true
+            for k = 1:length(long_run_indices)
+                % Get the start and end index for this specific sleep bout
+                current_run_idx = long_run_indices(k);
+                start_idx = run_starts(current_run_idx);
+                % The 'end' is the start of the '0', so the last '1' is one before it
+                end_idx = run_ends(current_run_idx) - 1;
+                
+                % Set this entire period to 'true' in our output vector
+                is_sleep(start_idx:end_idx) = true;
+            end
+        end
+        
+        % --- 4. Save the Result ---
+        
+        % Add the new 'is_sleep' vector to the classification structure
+        clean_position.classification.is_sleep = is_sleep;
+        
+        % Save the updated structure back to the same .mat file
+        save(input_file, 'clean_position', '-v7.3');
+        fprintf('      -> Saved `is_sleep` vector to file.\n');
+        
+    end
+end
+
+fprintf('\n=== SLEEP DETECTION SCRIPT COMPLETE ===\n');
+
+%% Visualise sleep periods! 
+% visualise_sleep_epochs
+%
+% PURPOSE:
+% Visualises speed data and overlays detected sleep periods as shaded regions,
+% with a corrected, automatically generated legend.
+
+clear;
+clc;
+close all;
+
+% --- 1. Define Root Path and Load Data ---
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+
+fprintf('=== STARTING SCRIPT TO VISUALIZE SLEEP EPOCHS ===\n');
+
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        input_file = fullfile(current_experiment_path, 'position_final_cm.mat');
+        if ~exist(input_file, 'file')
+            input_file = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        end
+        
+        if ~exist(input_file, 'file'), continue; end
+        
+        fprintf('  - Visualizing session: %s\n', session_name);
+        load(input_file, 'clean_position');
+        
+        if ~isfield(clean_position, 'classification') || ~isfield(clean_position.classification, 'is_sleep')
+            fprintf('      -> SKIPPING: `is_sleep` vector not found.\n');
+            continue;
+        end
+        
+        time = clean_position.binned.time_inj_aligned_s;
+        is_sleep = clean_position.classification.is_sleep;
+        
+        if isfield(clean_position.binned, 'speed_cm_s')
+            speed = clean_position.binned.speed_cm_s;
+            speed_units = 'cm/s';
+        else
+            speed = clean_position.binned.speed_px_s;
+            speed_units = 'px/s';
+        end
+
+        fig_title = sprintf('%s: Speed with Sleep Epochs', session_name);
+        figure('Name', fig_title, 'Color', 'w', 'Position', [100, 100, 1200, 450]);
+        ax = axes;
+        hold(ax, 'on');
+        
+        % Plot the speed, it already has a 'DisplayName'
+        plot(ax, time, speed, 'k', 'DisplayName', 'Speed');
+        
+        % Add shaded regions for sleep periods using the updated helper function
+        add_sleep_shading(ax, time, is_sleep);
+        
+        % Formatting
+        title(ax, fig_title, 'Interpreter', 'none');
+        xlabel(ax, 'Time from Injection (s)');
+        ylabel(ax, sprintf('Speed (%s)', speed_units));
+        
+        % --- CHANGE 1: Use an automatic legend ---
+        % This tells MATLAB to find all items with a 'DisplayName' and build the legend.
+        legend(ax, 'show', 'Location', 'northeast');
+        
+        grid on;
+        box on;
+    end
+end
+
+fprintf('\n=== VISUALIZATION SCRIPT COMPLETE ===\n');
+
+
+% --- HELPER FUNCTION (IMPROVED VERSION) ---
+function add_sleep_shading(axis_handle, time_vector, is_sleep_vector)
+    % Finds consecutive blocks of 'true' and draws a shaded patch.
+    % **IMPROVEMENT**: Only the first patch gets a 'DisplayName' to ensure a clean legend.
+    
+    if ~any(is_sleep_vector), return; end
+    
+    padded_vec = [0; is_sleep_vector(:); 0];
+    changes = diff(padded_vec);
+    start_indices = find(changes == 1);
+    end_indices = find(changes == -1) - 1;
+    
+    yl = ylim(axis_handle);
+    
+    for i = 1:length(start_indices)
+        start_time = time_vector(start_indices(i));
+        end_time = time_vector(end_indices(i));
+        
+        x_coords = [start_time, end_time, end_time, start_time];
+        y_coords = [yl(1), yl(1), yl(2), yl(2)];
+        
+        % --- CHANGE 2: Only label the FIRST patch for the legend ---
+        if i == 1
+            % The first sleep patch gets the DisplayName
+            patch(axis_handle, x_coords, y_coords, 'r', 'FaceColor', [1, 0.8, 0.8], ...
+                'FaceAlpha', 0.5, 'EdgeColor', 'none', 'DisplayName', 'Sleep Period');
+        else
+            % Subsequent patches are drawn but have no DisplayName, so they don't get a new legend entry
+            patch(axis_handle, x_coords, y_coords, 'r', 'FaceColor', [1, 0.8, 0.8], ...
+                'FaceAlpha', 0.5, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+        end
+    end
+    
+    uistack(findobj(axis_handle, 'Type', 'line'), 'top');
+end
+
+
+%% visualise_sleep_location
+%
+% PURPOSE:
+% Plots the 2D trajectory of the animal, coloring the path based on
+% whether the animal was classified as sleeping or awake.
+
+clear;
+clc;
+close all;
+
+% --- 1. Hard-code a specific session to visualize ---
+% You can change this path to look at any specific session
+session_to_plot = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction\B5\mouseB5_CNO_091412_day1\position_final_cm.mat';
+
+% --- 2. Load and Check Data ---
+if ~exist(session_to_plot, 'file')
+    error('File not found: %s', session_to_plot);
+end
+
+fprintf('Loading data from: %s\n', session_to_plot);
+load(session_to_plot, 'clean_position');
+
+if ~isfield(clean_position, 'classification') || ~isfield(clean_position.classification, 'is_sleep')
+    error('The loaded file does not contain the `is_sleep` vector.');
+end
+
+% --- 3. Extract Data ---
+is_sleep = clean_position.classification.is_sleep;
+is_awake = ~is_sleep;
+
+if isfield(clean_position.binned, 'x_cm')
+    x_pos = clean_position.binned.x_cm;
+    y_pos = clean_position.binned.y_cm;
+    pos_units = 'cm';
+else
+    x_pos = clean_position.binned.x_px;
+    y_pos = clean_position.binned.y_px;
+    pos_units = 'px';
+end
+[~, session_name] = fileparts(fileparts(session_to_plot)); % Get session name from path
+
+% --- 4. Create the Plot ---
+fig_title = sprintf('%s: Sleep and Wake Locations', session_name);
+figure('Name', fig_title, 'Color', 'w');
+ax = axes;
+hold(ax, 'on');
+
+% Plot 'Awake' points first as small blue dots
+plot(ax, x_pos(is_awake), y_pos(is_awake), '.', 'Color', [0 0.4470 0.7410], ...
+    'MarkerSize', 4, 'DisplayName', 'Awake');
+
+% Plot 'Sleep' points on top as larger red dots
+plot(ax, x_pos(is_sleep), y_pos(is_sleep), '.', 'Color', [0.8500 0.3250 0.0980], ...
+    'MarkerSize', 20, 'DisplayName', 'Sleep');
+
+% Formatting
+title(ax, fig_title, 'Interpreter', 'none');
+xlabel(ax, sprintf('X Position (%s)', pos_units));
+ylabel(ax, sprintf('Y Position (%s)', pos_units));
+legend('Location', 'best');
+axis equal tight;
+grid on;
+box on;
+set(ax, 'YDir', 'reverse'); % Often needed for video coordinates
+
+fprintf('Plot created successfully.\n');
+
+
+%% --- Visualise sleep + still epochs together for a single session ---
+clear;
+clc;
+close all;
+
+% 1. DEFINE THE SESSION TO INVESTIGATE
+session_to_plot = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction\B6_Probe\mouseB6_PBS_Day2_Sleep_11_28_2012\position_a_s_sc_inj_aligned.mat';
+
+% 2. LOAD DATA
+load(session_to_plot, 'clean_position');
+[~, session_name] = fileparts(fileparts(session_to_plot)); % Get session name
+
+% 3. EXTRACT 1-SECOND RESOLUTION DATA
+time_sec = clean_position.binned.time_inj_aligned_s;
+time_min = time_sec / 60;
+
+% Use cm/s if available, else px/s
+if isfield(clean_position.binned, 'speed_cm_s')
+    speed = clean_position.binned.speed_cm_s;
+    speed_units = 'cm/s';
+else
+    speed = clean_position.binned.speed_px_s;
+    speed_units = 'px/s';
+end
+
+is_still = clean_position.classification.is_still_integrated;
+is_sleep = clean_position.classification.is_sleep;
+
+% 4. CREATE THE PLOT
+figure('Position', [100, 100, 1400, 600]);
+ax = axes;
+hold(ax, 'on');
+
+% Plot speed
+plot(ax, time_min, speed, 'k-', 'DisplayName', 'Speed');
+
+% Shade the area where the algorithm thinks the animal is 'still'
+area(ax, time_min, is_still * max(ylim), 'FaceColor', 'b', 'FaceAlpha', 0.1, ...
+    'EdgeColor', 'none', 'DisplayName', 'Still');
+
+% Shade the area where the algorithm thinks the animal is 'sleeping'
+area(ax, time_min, is_sleep * max(ylim), 'FaceColor', 'r', 'FaceAlpha', 0.2, ...
+    'EdgeColor', 'none', 'DisplayName', 'Sleep');
+
+% 5. FORMATTING
+title(ax, 'Speed and Behavioural Classifications for Mouse B6 Experiment');
+xlabel('Time (minutes)');
+ylabel(['Speed (', speed_units, ')']);
+legend('show', 'Location', 'northeast');
+grid on;
+
+% Zoom into the problematic time range
+xlim(ax, [10, 240]);
