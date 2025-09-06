@@ -1,0 +1,103 @@
+%% SCRIPT: spatially_filter_masks
+%
+% PURPOSE:
+% A batch script that performs a final cleaning step on the data for
+% 'Mixed (Sleepbox + Track)' sessions. It ensures that all data points
+% classified as being in a certain arena (e.g., 'track') are also
+% physically located within that arena's defined spatial polygon. Any
+% mismatched points are considered artifacts and are nullified.
+
+clear;
+clc;
+close all;
+
+% --- 1. Define Root Path ---
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+
+fprintf('=== STARTING SPATIAL FILTERING OF TEMPORAL MASKS ===\n');
+
+% --- 2. Set Up Directory and Start Loop ---
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        % This script should update ALL final files
+        target_filenames = {'position_final_cm.mat', 'position_a_s_sc_inj_aligned.mat'};
+        
+        for f = 1:length(target_filenames)
+            input_file = fullfile(current_experiment_path, target_filenames{f});
+            
+            if ~exist(input_file, 'file'), continue; end
+            
+            fprintf('  - Checking file: %s\n', target_filenames{f});
+            load(input_file, 'clean_position');
+            
+            % --- 3. Run Filter ONLY on Mixed Sessions with Coords ---
+            if isfield(clean_position.summary, 'ArenaType') && strcmp(clean_position.summary.ArenaType, 'Mixed (Sleepbox + Track)') && isfield(clean_position, 'coords')
+                
+                % Extract data for checking
+                x_pos = clean_position.binned.x_px;
+                y_pos = clean_position.binned.y_px;
+                
+                % --- Filter Track Points ---
+                track_indices = find(clean_position.classification.is_track_binned);
+                track_outer_poly = clean_position.coords.track_outer_poly;
+                track_inner_poly = clean_position.coords.track_inner_poly;
+                
+                is_inside_outer = inpolygon(x_pos(track_indices), y_pos(track_indices), track_outer_poly(:,1), track_outer_poly(:,2));
+                is_inside_inner = inpolygon(x_pos(track_indices), y_pos(track_indices), track_inner_poly(:,1), track_inner_poly(:,2));
+                
+                is_spatially_valid_track = is_inside_outer & ~is_inside_inner;
+                artifact_track_indices = track_indices(~is_spatially_valid_track);
+                
+                % --- Filter Sleepbox Points ---
+                sleepbox_indices = find(clean_position.classification.is_sleepbox_binned);
+                circle_params = clean_position.coords.sleep_circle;
+                
+                is_outside_circle = ((x_pos(sleepbox_indices) - circle_params(1)).^2 + (y_pos(sleepbox_indices) - circle_params(2)).^2) > circle_params(3)^2;
+                artifact_sleepbox_indices = sleepbox_indices(is_outside_circle);
+                
+                % --- Apply Corrections ---
+                all_artifact_indices = unique([artifact_track_indices; artifact_sleepbox_indices]);
+                
+                if ~isempty(all_artifact_indices)
+                    fprintf('      -> Found and removed %d spatially misclassified points.\n', length(all_artifact_indices));
+                    
+                    % Nullify classification vectors
+                    clean_position.classification.is_track_binned(all_artifact_indices) = false;
+                    clean_position.classification.is_sleepbox_binned(all_artifact_indices) = false;
+                    clean_position.classification.is_still_integrated(all_artifact_indices) = false;
+                    clean_position.classification.is_sleep(all_artifact_indices) = false;
+                    
+                    % Nullify binned numerical data
+                    clean_position.binned.x_px(all_artifact_indices) = NaN;
+                    clean_position.binned.y_px(all_artifact_indices) = NaN;
+                    clean_position.binned.speed_px_s(all_artifact_indices) = NaN;
+                    if isfield(clean_position.binned, 'x_cm')
+                        clean_position.binned.x_cm(all_artifact_indices) = NaN;
+                        clean_position.binned.y_cm(all_artifact_indices) = NaN;
+                        clean_position.binned.speed_cm_s(all_artifact_indices) = NaN;
+                    end
+                    
+                    % Save the cleaned file
+                    save(input_file, 'clean_position', '-v7.3');
+                else
+                    fprintf('      -> No spatial mismatches found.\n');
+                end
+            else
+                 fprintf('      -> Skipping, not a Mixed session with coordinate data.\n');
+            end
+        end
+    end
+end
+
+fprintf('\n=== SPATIAL FILTERING COMPLETE ===\n');
