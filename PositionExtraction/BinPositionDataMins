@@ -1,0 +1,341 @@
+
+%% Script update - change zscored speed in track and sleepbox to have NaN for invalid datapoints 
+% This script bins 1-second data into 1-minute epochs. It creates separate
+% Z-score predictors for different behavioural states, padding irrelevant
+% entries with NaN ready for entry to our GLM!
+
+clear; clc; close all;
+
+% --- 1. Configuration ---
+% Using the data path from our conversation.
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+bin_width_seconds = 60;
+classification_threshold = 0.6; 
+
+fprintf('=== STARTING NaN-PADDED SCRIPT TO BIN DATA ===\n');
+
+% --- 2. Set Up Directory and Start Loop ---
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    fprintf('\n--- Processing Animal: %s ---\n', animal_folders(j).name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        input_file = fullfile(current_experiment_path, 'position_final_cm.mat');
+        if ~exist(input_file, 'file')
+            input_file = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        end
+        if ~exist(input_file, 'file')
+            fprintf('      -> SKIPPING: No position file found for %s.\n', session_name);
+            continue;
+        end
+        
+        fprintf('  - Binning session: %s\n', session_name);
+        load(input_file, 'clean_position');        
+        
+        % --- 3. DYNAMIC SETUP BASED ON ARENA TYPE ---
+        arena_type = clean_position.summary.ArenaType;
+        fprintf('      -> ArenaType detected: %s\n', arena_type);
+        
+        speed_fields = {'speed_px_s'};
+        if isfield(clean_position.binned, 'speed_cm_s'), speed_fields{end+1} = 'speed_cm_s'; end
+        
+        position_fields = {'x_px', 'y_px'};
+        if isfield(clean_position.binned, 'x_cm'), position_fields = [position_fields, {'x_cm', 'y_cm'}]; end
+        
+        switch arena_type
+            case 'Mixed (Sleepbox + Track)'
+                logical_flags_map = {
+                    'is_track_binned',    'is_on_track';
+                    'is_sleepbox_binned', 'is_in_sleepbox';
+                    'is_still_integrated','is_still';
+                    'is_sleep',           'is_sleep';
+                };
+            case 'OpenField'
+                logical_flags_map = {
+                    'is_still_integrated','is_still';
+                    'is_sleep',           'is_sleep';
+                };
+            case 'Sleepbox'
+                logical_flags_map = {
+                    'is_still_integrated','is_still';
+                    'is_sleep',           'is_sleep';
+                };
+        end
+        
+        time_sec = clean_position.binned.time_s;
+        bin_edges = floor(time_sec(1)) : bin_width_seconds : ceil(time_sec(end));
+        [~, ~, bin_indices] = histcounts(time_sec, bin_edges);
+        
+        BINNED_MINS = struct();
+        BINNED_MINS.time_s = bin_edges(1:end-1)';
+        
+        % --- 4. DATA PROCESSING BLOCKS ---
+
+        % SPEED
+        for f_idx = 1:length(speed_fields)
+            field_name = speed_fields{f_idx};
+            BINNED_MINS.(field_name) = struct();
+            data_to_bin = clean_position.binned.(field_name);
+            BINNED_MINS.(field_name).mean = accumarray(bin_indices(bin_indices>0), data_to_bin(bin_indices>0), [], @nanmean, NaN);
+            BINNED_MINS.(field_name).min  = accumarray(bin_indices(bin_indices>0), data_to_bin(bin_indices>0), [], @nanmin, NaN);
+            BINNED_MINS.(field_name).max  = accumarray(bin_indices(bin_indices>0), data_to_bin(bin_indices>0), [], @nanmax, NaN);
+            BINNED_MINS.(field_name).std  = accumarray(bin_indices(bin_indices>0), data_to_bin(bin_indices>0), [], @nanstd, NaN);
+        end
+
+        % POSITION
+        if strcmp(arena_type, 'Mixed (Sleepbox + Track)')
+            is_track = clean_position.classification.is_track_binned;
+            is_sleepbox = clean_position.classification.is_sleepbox_binned;
+            for f_idx = 1:length(position_fields)
+                field_name = position_fields{f_idx};
+                pos_data = clean_position.binned.(field_name);
+                pos_data_track = pos_data; pos_data_track(~is_track) = NaN;
+                pos_data_sleepbox = pos_data; pos_data_sleepbox(~is_sleepbox) = NaN;
+                BINNED_MINS.([field_name '_track']) = accumarray(bin_indices(bin_indices>0), pos_data_track(bin_indices>0), [], @nanmean, NaN);
+                BINNED_MINS.([field_name '_sleepbox']) = accumarray(bin_indices(bin_indices>0), pos_data_sleepbox(bin_indices>0), [], @nanmean, NaN);
+            end
+        else
+            for f_idx = 1:length(position_fields)
+                field_name = position_fields{f_idx};
+                pos_data = clean_position.binned.(field_name);
+                BINNED_MINS.(field_name) = accumarray(bin_indices(bin_indices>0), pos_data(bin_indices>0), [], @nanmean, NaN);
+            end
+        end
+
+        % LOGICALS
+        for f_idx = 1:size(logical_flags_map, 1)
+            original_field = logical_flags_map{f_idx, 1};
+            new_field = logical_flags_map{f_idx, 2};
+            if isfield(clean_position.classification, original_field)
+                data_to_bin = double(clean_position.classification.(original_field));
+                BINNED_MINS.(new_field) = accumarray(bin_indices(bin_indices>0), data_to_bin(bin_indices>0), [], @nanmean, NaN);
+            end
+        end
+
+        % --- 5. TIME ALIGNMENT ---
+        if isfield(clean_position, 'injection_timestamp_s') && ~isempty(clean_position.injection_timestamp_s)
+            BINNED_MINS.time_inj_aligned_s = BINNED_MINS.time_s - clean_position.injection_timestamp_s;
+            BINNED_MINS.time_inj_aligned_mins = BINNED_MINS.time_inj_aligned_s / 60;
+        end
+
+        % --- 6. GLM-READY Z-SCORE CALCULATION (NaN-Padded) ---
+        fprintf('      -> Calculating separate, NaN-padded Z-score predictors for GLM...\n');
+        
+        for s_idx = 1:length(speed_fields)
+            speed_field = speed_fields{s_idx};
+            binned_speed = BINNED_MINS.(speed_field).mean;
+            
+            if strcmp(arena_type, 'Mixed (Sleepbox + Track)')
+                % Initialize vectors with NaNs instead of zeros
+                z_scores_track = NaN(size(binned_speed));
+                z_scores_sleepbox = NaN(size(binned_speed));
+                
+                is_track_minute = BINNED_MINS.is_on_track >= classification_threshold;
+                is_sleepbox_minute = BINNED_MINS.is_in_sleepbox >= classification_threshold;
+                
+                mean_track = nanmean(binned_speed(is_track_minute));
+                std_track  = nanstd(binned_speed(is_track_minute));
+                if std_track > 0
+                    z_scores_track(is_track_minute) = (binned_speed(is_track_minute) - mean_track) / std_track;
+                end
+                
+                mean_sleepbox = nanmean(binned_speed(is_sleepbox_minute));
+                std_sleepbox  = nanstd(binned_speed(is_sleepbox_minute));
+                if std_sleepbox > 0
+                    z_scores_sleepbox(is_sleepbox_minute) = (binned_speed(is_sleepbox_minute) - mean_sleepbox) / std_sleepbox;
+                end
+                
+                BINNED_MINS.(speed_field).zscore_track = z_scores_track;
+                BINNED_MINS.(speed_field).zscore_sleepbox = z_scores_sleepbox;
+
+            else
+                % Initialize with NaNs for OpenField/Sleepbox as well
+                z_scores_moving = NaN(size(binned_speed));
+                is_moving_minute = BINNED_MINS.is_still < (1.0 - classification_threshold);
+                
+                mean_moving = nanmean(binned_speed(is_moving_minute));
+                std_moving  = nanstd(binned_speed(is_moving_minute));
+                if std_moving > 0
+                    z_scores_moving(is_moving_minute) = (binned_speed(is_moving_minute) - mean_moving) / std_moving;
+                end
+                
+                BINNED_MINS.(speed_field).zscore_moving = z_scores_moving;
+            end
+        end
+
+        % --- 7. Final Assignment and Save ---
+        clean_position.binned_mins = BINNED_MINS;
+        save(input_file, 'clean_position', '-v7.3');
+        fprintf('      -> Successfully created and saved `binned_mins`.\n');
+    end
+end
+
+fprintf('\n=== BINNING SCRIPT COMPLETE ===\n');
+%% validate_binned_data 
+% This script loops through all processed data files and generates a 
+% 4-panel validation figure for each session to visually inspect the
+% output of the 'bin_data_by_minute_v5' script.
+
+% Press any key to close the current figure and advance to the next session.
+
+clear; clc; close all;
+
+% --- 1. Configuration ---
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+fprintf('=== STARTING VALIDATION SCRIPT (CORRECTED) ===\n');
+
+% --- 2. Set Up Directory and Start Loop ---
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+
+for j = 1:length(animal_folders)
+    current_animal_path = fullfile(data_root_path, animal_folders(j).name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        % --- Load the processed file ---
+        input_file = fullfile(current_experiment_path, 'position_final_cm.mat');
+        if ~exist(input_file, 'file')
+            input_file = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        end
+        if ~exist(input_file, 'file')
+            fprintf(' -> SKIPPING: No position file found for %s.\n', session_name);
+            continue;
+        end
+        
+        fprintf(' - Validating session: %s\n', session_name);
+        load(input_file, 'clean_position');
+        
+        if ~isfield(clean_position, 'binned_mins')
+            fprintf('      -> SKIPPING: `binned_mins` structure not found.\n');
+            continue;
+        end
+        
+        binned = clean_position.binned;
+        binned_mins = clean_position.binned_mins;
+        arena_type = clean_position.summary.ArenaType;
+        
+        % --- 3. Create the Validation Figure ---
+        figure('WindowState', 'maximized');
+        sgtitle(session_name, 'Interpreter', 'none', 'FontSize', 14, 'FontWeight', 'bold');
+        tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+        
+        %% --- PLOT 1: Position Centroid Validation ---
+        nexttile;
+        hold on;
+        
+        if isfield(binned, 'x_cm')
+            plot(binned.x_cm, binned.y_cm, '.', 'Color', [0.8 0.8 0.8], 'DisplayName', '1s Raw');
+            xlabel('X (cm)'); ylabel('Y (cm)');
+        else
+            plot(binned.x_px, binned.y_px, '.', 'Color', [0.8 0.8 0.8], 'DisplayName', '1s Raw');
+            xlabel('X (px)'); ylabel('Y (px)');
+        end
+        
+        if strcmp(arena_type, 'Mixed (Sleepbox + Track)')
+            scatter(binned_mins.x_cm_track, binned_mins.y_cm_track, 50, 'r', 'filled', 'DisplayName', 'Track Centroid');
+            scatter(binned_mins.x_cm_sleepbox, binned_mins.y_cm_sleepbox, 50, 'b', 'filled', 'DisplayName', 'Sleepbox Centroid');
+        else
+            % *** THIS BLOCK IS NOW FIXED ***
+            if isfield(binned_mins, 'x_cm')
+                scatter(binned_mins.x_cm, binned_mins.y_cm, 50, 'm', 'filled', 'DisplayName', 'Binned Position');
+            else
+                scatter(binned_mins.x_px, binned_mins.y_px, 50, 'm', 'filled', 'DisplayName', 'Binned Position');
+            end
+        end
+        
+        axis tight equal;
+        set(gca, 'YDir', 'reverse');
+        legend('show', 'Location', 'best');
+        title('Position Centroid Validation');
+        
+        %% --- PLOT 2: Speed Dynamics (Mean +/- Std) ---
+        nexttile;
+        hold on;
+        
+        if isfield(binned_mins, 'speed_cm_s')
+            time_mins = binned_mins.time_inj_aligned_mins;
+            mean_speed = binned_mins.speed_cm_s.mean;
+            std_speed = binned_mins.speed_cm_s.std;
+            ylabel('Speed (cm/s)');
+        else
+            time_mins = binned_mins.time_inj_aligned_mins;
+            mean_speed = binned_mins.speed_px_s.mean;
+            std_speed = binned_mins.speed_px_s.std;
+            ylabel('Speed (px/s)');
+        end
+        
+        fill([time_mins; flipud(time_mins)], [mean_speed - std_speed; flipud(mean_speed + std_speed)], ...
+             'b', 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'DisplayName', 'Std Dev');
+        plot(time_mins, mean_speed, 'b-', 'LineWidth', 1.5, 'DisplayName', 'Mean');
+        xlabel('Time (mins from injection)');
+        title('Speed Dynamics');
+        legend('show', 'Location', 'best');
+        grid on;
+        
+        %% --- PLOT 3: Behavioral State Proportions ---
+        nexttile;
+        hold on;
+        
+        plot_fields = {};
+        if isfield(binned_mins, 'is_on_track'), plot_fields{end+1} = 'is_on_track'; end
+        if isfield(binned_mins, 'is_in_sleepbox'), plot_fields{end+1} = 'is_in_sleepbox'; end
+        if isfield(binned_mins, 'is_still'), plot_fields{end+1} = 'is_still'; end
+
+        for k = 1:length(plot_fields)
+            plot(time_mins, binned_mins.(plot_fields{k}), '.-', 'DisplayName', plot_fields{k}, 'LineWidth', 1.5);
+        end
+        
+        ylim([-0.1 1.1]);
+        xlabel('Time (mins from injection)');
+        ylabel('Proportion of Minute');
+        title('Behavioral State Proportions');
+        legend('show', 'Location', 'best');
+        grid on;
+        
+        %% --- PLOT 4: GLM-Ready Z-Scores ---
+        nexttile;
+        hold on;
+        
+        if isfield(binned_mins, 'speed_cm_s')
+            speed_struct = binned_mins.speed_cm_s;
+        else
+            speed_struct = binned_mins.speed_px_s;
+        end
+        
+        if isfield(speed_struct, 'zscore_track')
+            plot(time_mins, speed_struct.zscore_track, 'r.-', 'DisplayName', 'Z-score Track');
+            plot(time_mins, speed_struct.zscore_sleepbox, 'b.-', 'DisplayName', 'Z-score Sleepbox');
+        elseif isfield(speed_struct, 'zscore_moving')
+            plot(time_mins, speed_struct.zscore_moving, 'm.-', 'DisplayName', 'Z-score Moving');
+        end
+        
+        yline(0, 'k--', 'HandleVisibility', 'off');
+        yline(2, 'k:', 'DisplayName', '+2 SD');
+        yline(-2, 'k:', 'HandleVisibility', 'off');
+        xlabel('Time (mins from injection)');
+        ylabel('Z-Scored Speed');
+        title('GLM-Ready Z-Scores');
+        legend('show', 'Location', 'best');
+        grid on;
+        
+        % --- 4. Pause for Inspection ---
+        waitforbuttonpress;
+        close(gcf);
+    end
+end
+fprintf('\n=== VALIDATION SCRIPT COMPLETE ===\n');
