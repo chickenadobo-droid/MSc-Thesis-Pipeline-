@@ -1,0 +1,242 @@
+%% SCRIPT: interactive_curation_tool
+%
+% PURPOSE:
+% An interactive tool to manually remove artifacts using 
+% tilted rectangles/polygon selection/ axis-aligned rectangles to remove obvious tracking artifacts in still spatial data 
+% this was done where tracker obviously dropped out and classified either x position stable when y was moving or vice-versa 
+
+% --- 1. DEFINE THE SESSION TO CURATE ---
+session_to_curate = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction\B5\mouseB5_CNO_091612_day2\position_final_cm.mat'; %<-- SET THIS PATH
+
+% --- 2. Load Data ---
+if ~exist(session_to_curate, 'file'), error('File not found: %s', session_to_curate); end
+fprintf('Loading data for curation: %s\n', session_to_curate);
+load(session_to_curate, 'clean_position');
+[~, session_name] = fileparts(fileparts(session_to_curate));
+
+% --- 3. Create the Initial Plot ---
+fig = figure('Name', ['Interactive Curation for ', session_name], 'Color', 'w', 'Position', [100, 100, 900, 800]);
+ax = axes;
+
+% A helper function to draw the current data state
+update_plot(ax, clean_position);
+
+% --- 4. Interactive Removal Loop ---
+while true
+    fprintf('\nSelection options:\n');
+    fprintf('  1. Rectangle (axis-aligned) - press ''r''\n');
+    fprintf('  2. Tilted rectangle (4 corners) - press ''t''\n');
+    fprintf('  3. Polygon (any shape) - press ''p''\n');
+    fprintf('  4. Finish curation - press ''n''\n');
+    
+    choice = input('Choose selection method (r/t/p/n): ', 's');
+    
+    if strcmpi(choice, 'r')
+        % Original rectangle method
+        title(ax, 'Draw a RECTANGLE around the artifact, then DOUBLE-CLICK inside it', 'Color', 'r');
+        fprintf('Please draw a rectangle around the artifact on the plot...\n');
+        
+        roi = drawrectangle(ax);
+        rect_position = roi.Position; % [x_min, y_min, width, height]
+        delete(roi);
+        
+        x_range = [rect_position(1), rect_position(1) + rect_position(3)];
+        y_range = [rect_position(2), rect_position(2) + rect_position(4)];
+        
+        % Find points inside axis-aligned rectangle
+        x_pos = clean_position.binned.x_px;
+        y_pos = clean_position.binned.y_px;
+        is_still = clean_position.classification.is_still_integrated;
+        
+        artifact_indices = find(x_pos >= x_range(1) & x_pos <= x_range(2) & ...
+                                y_pos >= y_range(1) & y_pos <= y_range(2) & ...
+                                is_still);
+        
+    elseif strcmpi(choice, 't')
+        % Tilted rectangle method - select 4 corners
+        title(ax, 'Click 4 CORNERS of the tilted rectangle (in order)', 'Color', 'r');
+        fprintf('Click 4 corners of the tilted rectangle in order...\n');
+        
+        corners = [];
+        for i = 1:4
+            fprintf('Click corner %d/4...\n', i);
+            [x_corner, y_corner] = ginput(1);
+            corners = [corners; x_corner, y_corner];
+            
+            % Draw the corners as we go
+            hold(ax, 'on');
+            plot(ax, x_corner, y_corner, 'ro', 'MarkerSize', 8, 'LineWidth', 2);
+            
+            % Draw lines between consecutive corners
+            if i > 1
+                plot(ax, [corners(i-1,1), corners(i,1)], [corners(i-1,2), corners(i,2)], 'r-', 'LineWidth', 2);
+            end
+        end
+        
+        % Close the rectangle
+        plot(ax, [corners(end,1), corners(1,1)], [corners(end,2), corners(1,2)], 'r-', 'LineWidth', 2);
+        
+        % Find points inside the tilted rectangle using inpolygon
+        x_pos = clean_position.binned.x_px;
+        y_pos = clean_position.binned.y_px;
+        is_still = clean_position.classification.is_still_integrated;
+        
+        % Use inpolygon to check which points are inside
+        inside_poly = inpolygon(x_pos, y_pos, corners(:,1), corners(:,2));
+        artifact_indices = find(inside_poly & is_still);
+        
+        % Clean up the drawn lines and points
+        pause(1); % Let user see the selection
+        
+    elseif strcmpi(choice, 'p')
+        % Free-form polygon method
+        title(ax, 'Draw a POLYGON around artifacts (double-click to finish)', 'Color', 'r');
+        fprintf('Draw a polygon around the artifacts. Double-click to finish...\n');
+        
+        roi = drawpolygon(ax);
+        polygon_vertices = roi.Position;
+        delete(roi);
+        
+        % Find points inside the polygon
+        x_pos = clean_position.binned.x_px;
+        y_pos = clean_position.binned.y_px;
+        is_still = clean_position.classification.is_still_integrated;
+        
+        inside_poly = inpolygon(x_pos, y_pos, polygon_vertices(:,1), polygon_vertices(:,2));
+        artifact_indices = find(inside_poly & is_still);
+        
+    elseif strcmpi(choice, 'n')
+        fprintf('Finished selecting artifacts.\n');
+        break;
+    else
+        fprintf('Invalid input. Please enter ''r'', ''t'', ''p'', or ''n''.\n');
+        continue;
+    end
+    
+    % Process the selected artifacts
+    if exist('artifact_indices', 'var') && ~isempty(artifact_indices)
+        fprintf('Found %d ''Still'' points in the selected region.\n', length(artifact_indices));
+        
+        % Show preview of selected points
+        hold(ax, 'on');
+        x_selected = clean_position.binned.x_px(artifact_indices);
+        y_selected = clean_position.binned.y_px(artifact_indices);
+        h_preview = plot(ax, x_selected, y_selected, 'mx', 'MarkerSize', 10, 'LineWidth', 3);
+        
+        confirm = input(sprintf('Remove these %d points? (y/n): ', length(artifact_indices)), 's');
+        delete(h_preview); % Remove preview markers
+        
+        if strcmpi(confirm, 'y')
+            fprintf('Nullifying selected points...\n');
+            
+            % Nullify all relevant data fields for these indices
+            clean_position.classification.is_still_integrated(artifact_indices) = false;
+            clean_position.classification.is_sleep(artifact_indices) = false;
+            if isfield(clean_position.classification, 'is_track_binned')
+                clean_position.classification.is_track_binned(artifact_indices) = false;
+            end
+            if isfield(clean_position.classification, 'is_sleepbox_binned')
+                clean_position.classification.is_sleepbox_binned(artifact_indices) = false;
+            end
+            
+            clean_position.binned.x_px(artifact_indices) = NaN;
+            clean_position.binned.y_px(artifact_indices) = NaN;
+            clean_position.binned.speed_px_s(artifact_indices) = NaN;
+            if isfield(clean_position.binned, 'x_cm')
+                clean_position.binned.x_cm(artifact_indices) = NaN;
+            end
+            if isfield(clean_position.binned, 'y_cm')
+                clean_position.binned.y_cm(artifact_indices) = NaN;
+            end
+            if isfield(clean_position.binned, 'speed_cm_s')
+                clean_position.binned.speed_cm_s(artifact_indices) = NaN;
+            end
+            
+            cla(ax);
+            update_plot(ax, clean_position);
+            fprintf('Plot updated.\n');
+        else
+            fprintf('Selection cancelled.\n');
+        end
+    else
+        fprintf('No ''Still'' data points found in the selected region.\n');
+    end
+    
+    % Clear the artifact_indices variable for next iteration
+    clear artifact_indices;
+    
+    title(ax, ['Spatial Stillness Classification for ', session_name], 'Interpreter', 'none');
+end
+
+% --- 5. Final Save Confirmation ---
+save_choice = input('Do you want to save the changes to the file? (y/n): ', 's');
+if strcmpi(save_choice, 'y')
+    save(session_to_curate, 'clean_position', '-v7.3');
+    fprintf('File saved: %s\n', session_to_curate);
+else
+    fprintf('Changes discarded.\n');
+end
+
+close(fig);
+fprintf('Curation tool closed.\n');
+
+
+%% --- HELPER FUNCTION TO DRAW THE PLOT ---
+function update_plot(ax, clean_position)
+    hold(ax, 'on');
+    x_pos = clean_position.binned.x_px;
+    y_pos = clean_position.binned.y_px;
+    is_still = clean_position.classification.is_still_integrated;
+    
+    if isfield(clean_position, 'coords')
+        try
+            track_outer_x = clean_position.coords.track_outer_poly(:, 1);
+            track_outer_y = clean_position.coords.track_outer_poly(:, 2);
+            track_inner_x = clean_position.coords.track_inner_poly(:, 1);
+            track_inner_y = clean_position.coords.track_inner_poly(:, 2);
+            patch(ax, track_outer_x, track_outer_y, [0.8 0.9 1], 'FaceAlpha', 0.5, 'EdgeColor', 'none');
+            patch(ax, track_inner_x, track_inner_y, 'w', 'FaceAlpha', 1, 'EdgeColor', 'none');
+            circle_params = clean_position.coords.sleep_circle;
+            theta = linspace(0, 2*pi, 100);
+            x_circle = circle_params(3) * cos(theta) + circle_params(1);
+            y_circle = circle_params(3) * sin(theta) + circle_params(2);
+            patch(ax, x_circle, y_circle, [1 0.8 0.8], 'FaceAlpha', 0.5, 'EdgeColor', 'none');
+        catch
+            fprintf('Could not draw arena zones.\n');
+        end
+    end
+
+    plot(ax, x_pos, y_pos, '.', 'Color', [0.7 0.7 0.7], 'MarkerSize', 5, 'DisplayName', 'All Data Points');
+    still_indices = find(is_still);
+    plot(ax, x_pos(still_indices), y_pos(still_indices), 'o', 'MarkerEdgeColor', 'k', 'MarkerFaceColor', [0.91, 0.41, 0.17], 'MarkerSize', 5, 'DisplayName', 'Still Points');
+        
+    title(ax, ['Spatial Stillness Classification for ', clean_position.summary.session], 'Interpreter', 'none');
+    xlabel(ax, 'X Position (pixels)');
+    ylabel(ax, 'Y Position (pixels)');
+    axis equal tight; grid on; box on;
+    set(ax, 'YDir', 'reverse');
+    legend(ax, 'show', 'Location', 'best');
+end
+
+%% --- ALTERNATIVE: Rotated Rectangle Function (if you prefer programmatic approach) ---
+function inside = point_in_rotated_rectangle(points, center, width, height, angle_deg)
+    % Check if points are inside a rotated rectangle
+    % points: [N x 2] array of [x, y] coordinates
+    % center: [x, y] center of rectangle
+    % width, height: dimensions of rectangle
+    % angle_deg: rotation angle in degrees
+    
+    angle_rad = deg2rad(angle_deg);
+    cos_a = cos(angle_rad);
+    sin_a = sin(angle_rad);
+    
+    % Translate points to rectangle's local coordinate system
+    translated_points = points - center;
+    
+    % Rotate points to align with rectangle axes
+    rotated_x = translated_points(:,1) * cos_a + translated_points(:,2) * sin_a;
+    rotated_y = -translated_points(:,1) * sin_a + translated_points(:,2) * cos_a;
+    
+    % Check if points are inside the axis-aligned rectangle
+    inside = abs(rotated_x) <= width/2 & abs(rotated_y) <= height/2;
+end
