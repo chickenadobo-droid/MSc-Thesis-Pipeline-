@@ -7,7 +7,7 @@ The core of the analysis involves
 
 i) Behavioural Data Processing; Batch processing of video tracking data to extract animal position, clean artifacts, calculate speed, and define behavioural states based on stringent, data-driven criteria.
 
-ii) Neural Data Extraction; Extraction of neural features like sharp-wave ripple events/power, theta power/frequency and multi-unit activity (MUA).
+ii) Neural Data Extraction; Extraction of neural features like sharp-wave ripple events/power, theta power/frequency and multi-unit activity.
 
 iii) Integrated Statistical Modelling; Implementation of linear mixed-effects models to assess the impact of experimental conditions (CNO vs. Vehicle) on neural activity, while accounting for behavioural state and time as covariates.
 
