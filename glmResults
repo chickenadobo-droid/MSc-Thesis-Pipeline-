@@ -1,0 +1,426 @@
+% =================================================== %
+%% CNO Effects GLM Analysis - Neural Time Course %
+%% ================================================== %
+clc; 
+clearvars -except Final_GLM_Table; 
+close all;
+
+%% 0) Data Setup with Final Time Bins
+fprintf('--- 0. Setting up data with final, data-driven time bins ---\n');
+T = Final_GLM_Table;
+
+% Categorical fixes
+T.AnimalID         = categorical(T.AnimalID);
+T.Condition        = categorical(T.Condition);
+T.BehaviouralState = categorical(T.BehaviouralState);
+T.Location         = categorical(T.Location);
+
+% Drop excluded rows
+T = T(~strcmp(string(T.BehaviouralState),'Animal_Removed') & ~isundefined(T.BehaviouralState), :);
+
+% --- FINAL, DATA-DRIVEN TIME BINS ---
+time_bins       = [-inf, 0, 60, 120, 180, 240, 300, inf]; 
+bin_labels      = {'Pre','Post_0_60','Post_60_120','Post_120_180','Post_180_240','Post_240_300','Post_300_plus'};
+epochs_for_plot = {'Pre','0-60','60-120','120-180','180-240','240-300','>300'};
+T.InjectionEpoch = discretize(T.time_min, time_bins, 'categorical', bin_labels);
+
+% Neural variable ------------------------- CHANGE TO WHATEVER DV YOU WISH
+% TO ANALYSE 
+neural_variable = 'MUA_mean_z'; 
+fprintf('Analysing dependent variable: %s\n\n', neural_variable);
+
+% Remove rows with missing Location
+T_loc = T(~isundefined(T.Location) & ~ismissing(T.Location),:);
+
+fprintf('Data dimensions: %d rows, %d columns\n', height(T_loc), width(T_loc));
+fprintf('Conditions: %s\n', strjoin(string(categories(T_loc.Condition)), ', '));
+fprintf('Behavioural States: %s\n', strjoin(string(categories(T_loc.BehaviouralState)), ', '));
+fprintf('Locations: %s\n\n', strjoin(string(categories(T_loc.Location)), ', '));
+
+%% 1) Fit the Final Unified Model 
+fprintf('--- 1. Fitting the final linear mixed-effects model ---\n');
+formula_final = sprintf('%s ~ Condition*InjectionEpoch*BehaviouralState + Location + (1|AnimalID) + (1|SessionName)', neural_variable);
+
+try
+    final_model = fitlme(T_loc, formula_final);
+    disp('✓ Model fitting successful!');
+    fprintf('\n--- FINAL MODEL ANOVA ---\n'); 
+    anova_table = anova(final_model);
+    disp(anova_table);
+catch ME
+    fprintf('❌ MODEL FITTING FAILED: %s\n', ME.message);
+    fprintf('The model is likely too complex for the data.\n');
+    fprintf('Try simplifying: remove 3-way interaction or fit separate models per location.\n');
+    return;
+end
+
+%% 2) Post-Hoc Contrasts (CNO vs Vehicle by State and Epoch)
+fprintf('\n--- 2. Calculating post-hoc contrasts ---\n');
+
+coefNames = final_model.CoefficientNames(:);
+beta      = final_model.Coefficients.Estimate;
+CovB      = final_model.CoefficientCovariance;
+states    = categories(removecats(categorical(final_model.Variables.BehaviouralState)))';
+epochs    = bin_labels;
+refLocation = 'Sleepbox'; % Adjust if needed based on your reference level
+getidx    = @(nm) find(strcmp(coefNames,nm),1);
+
+out = table(); 
+
+for s = 1:numel(states)
+    state = states{s};
+    for e = 1:numel(epochs)
+        epoch = epochs{e};
+        
+        % Build contrast vector for CNO condition
+        A_cno = zeros(1,numel(coefNames)); 
+        A_cno(getidx('(Intercept)'))=1;
+        
+        % Add state effect (if not reference)
+        if ~strcmp(state,'Mixed')
+            j=getidx(sprintf('BehaviouralState_%s',state)); 
+            if ~isempty(j), A_cno(j)=1; end
+        end
+        
+        % Add epoch effect (if not Pre)
+        if ~strcmp(epoch,'Pre')
+            j=getidx(sprintf('InjectionEpoch_%s',epoch)); 
+            if ~isempty(j), A_cno(j)=1; end
+        end
+        
+        % Add state:epoch interaction
+        if ~strcmp(state,'Mixed') && ~strcmp(epoch,'Pre')
+            j=getidx(sprintf('BehaviouralState_%s:InjectionEpoch_%s',state,epoch)); 
+            if ~isempty(j), A_cno(j)=1; end
+        end
+        
+        % Add location effect
+        j=getidx(sprintf('Location_%s',refLocation)); 
+        if ~isempty(j), A_cno(j)=1; end
+        
+        % Build contrast for Vehicle
+        A_veh = A_cno;
+        j=getidx('Condition_Vehicle'); 
+        if ~isempty(j), A_veh(j)=1; end
+        
+        if ~strcmp(state,'Mixed')
+            j=getidx(sprintf('Condition_Vehicle:BehaviouralState_%s',state)); 
+            if ~isempty(j), A_veh(j)=1; end
+        end
+        
+        if ~strcmp(epoch,'Pre')
+            j=getidx(sprintf('Condition_Vehicle:InjectionEpoch_%s',epoch)); 
+            if ~isempty(j), A_veh(j)=1; end
+        end
+        
+        if ~strcmp(state,'Mixed') && ~strcmp(epoch,'Pre')
+            j=getidx(sprintf('Condition_Vehicle:BehaviouralState_%s:InjectionEpoch_%s',state,epoch)); 
+            if ~isempty(j), A_veh(j)=1; end
+        end
+        
+        % Compute contrast (Vehicle - CNO)
+        L = A_veh - A_cno;
+        [F, p, ~, df2] = coefTest(final_model, L, 0);
+        est = L*beta;
+        se  = sqrt(L*CovB*L');
+        tcrit = tinv(0.975, df2);
+        
+        out_row = table(string(state), string(epoch), A_cno*beta, A_veh*beta, ...
+                       -est, se, F, p, -est-tcrit*se, -est+tcrit*se, ...
+                       'VariableNames', {'BehaviouralState','InjectionEpoch','EMM_CNO',...
+                       'EMM_Vehicle','Diff_CNO_minus_Vehicle','SE','F','pValue','CI_low','CI_high'});
+        out = [out; out_row];
+    end
+end
+
+% Make epoch ordinal and add FDR correction
+out.InjectionEpoch = categorical(out.InjectionEpoch, epochs, 'Ordinal', true);
+out.q_FDR = fdr_bh(out.pValue);
+out = sortrows(out, {'BehaviouralState','InjectionEpoch'});
+
+fprintf('\n=== Post-hoc: CNO vs Vehicle by Behavioural State & Epoch ===\n');
+disp(out);
+
+%% 3) Facet Plot (By Behavioural State)
+fprintf('\n--- 3. Generating facet plot by behavioural state ---\n');
+
+figure('Color','w','Position',[100 100 1400 800]); 
+tiledlayout('flow', 'TileSpacing', 'compact', 'Padding', 'compact');
+sgtitle('Effect of CNO vs Vehicle on Multi-Unit Activity by Behavioural State', ...
+        'FontSize', 16, 'FontWeight', 'bold');
+
+all_emm_values = [out.EMM_CNO; out.EMM_Vehicle];
+ylim_global = [min(all_emm_values)-0.3, max(all_emm_values)+0.5];
+
+cno_color = [0.8500 0.3250 0.0980]; 
+vehicle_color = [0 0.4470 0.7410]; 
+
+for s = 1:numel(states)
+    ax = nexttile;
+    state_data = out(out.BehaviouralState == states{s}, :);
+    
+    plot(1:numel(epochs), state_data.EMM_CNO, '-o', ...
+         'Color', cno_color, 'LineWidth', 2.5, 'MarkerSize', 8, ...
+         'MarkerFaceColor', cno_color, 'DisplayName', 'CNO'); 
+    hold on;
+    plot(1:numel(epochs), state_data.EMM_Vehicle, '-s', ...
+         'Color', vehicle_color, 'LineWidth', 2.5, 'MarkerSize', 8, ...
+         'MarkerFaceColor', vehicle_color, 'DisplayName', 'Vehicle');
+    
+    set(gca, 'FontSize', 12, 'FontName', 'Arial');
+    xticks(1:numel(epochs)); 
+    xticklabels(epochs_for_plot); 
+    xtickangle(45);
+    xlabel('Time relative to injection (min)'); 
+    ylim([-2 2]);
+    ylabel('Multi-Unit Activity Mean (z-scored)');
+    title(strrep(char(states{s}), '_', ' '));
+    grid on; box on;
+    
+    if s == 1
+        legend('Location','best','Box','off');
+    end
+end
+
+%% 4) Marginal Effects (Behaviour-Controlled, Averaged Across States)
+fprintf('\n--- 4. Calculating behaviour-controlled marginal effects ---\n');
+
+marg = table();
+for e = 1:numel(epochs)
+    epoch_str = epochs{e};
+    epoch_data = out(out.InjectionEpoch == epoch_str, :);
+    
+    marg_row = table(categorical({epoch_str}, epochs, 'Ordinal', true), ...
+                     mean(epoch_data.EMM_CNO, 'omitnan'), ...
+                     mean(epoch_data.EMM_Vehicle, 'omitnan'), ...
+                     mean(epoch_data.Diff_CNO_minus_Vehicle, 'omitnan'), ...
+                     'VariableNames', {'InjectionEpoch', 'EMM_CNO', 'EMM_Vehicle', 'Diff_CNO_minus_Vehicle'});
+    marg = [marg; marg_row];
+end
+
+% Calculate marginal statistics using averaged contrasts
+marg_stats = table();
+for e = 1:numel(epochs)
+    epoch_str = epochs{e};
+    epoch_data = out(out.InjectionEpoch == epoch_str, :);
+    
+    % Average the contrast across behavioral states
+    L_avg = zeros(1, numel(coefNames));
+    n_states = height(epoch_data);
+    
+    for k = 1:n_states
+        state = char(epoch_data.BehaviouralState(k));
+        
+        % Build CNO contrast
+        A_cno = zeros(1,numel(coefNames)); 
+        A_cno(getidx('(Intercept)'))=1;
+        
+        if ~strcmp(state,'Mixed')
+            j=getidx(sprintf('BehaviouralState_%s',state)); 
+            if ~isempty(j), A_cno(j)=1; end
+        end
+        
+        if ~strcmp(epoch_str,'Pre')
+            j=getidx(sprintf('InjectionEpoch_%s',epoch_str)); 
+            if ~isempty(j), A_cno(j)=1; end
+        end
+        
+        if ~strcmp(state,'Mixed') && ~strcmp(epoch_str,'Pre')
+            j=getidx(sprintf('BehaviouralState_%s:InjectionEpoch_%s',state,epoch_str)); 
+            if ~isempty(j), A_cno(j)=1; end
+        end
+        
+        j=getidx(sprintf('Location_%s',refLocation)); 
+        if ~isempty(j), A_cno(j)=1; end
+        
+        % Build Vehicle contrast
+        A_veh = A_cno;
+        j=getidx('Condition_Vehicle'); 
+        if ~isempty(j), A_veh(j)=1; end
+        
+        if ~strcmp(state,'Mixed')
+            j=getidx(sprintf('Condition_Vehicle:BehaviouralState_%s',state)); 
+            if ~isempty(j), A_veh(j)=1; end
+        end
+        
+        if ~strcmp(epoch_str,'Pre')
+            j=getidx(sprintf('Condition_Vehicle:InjectionEpoch_%s',epoch_str)); 
+            if ~isempty(j), A_veh(j)=1; end
+        end
+        
+        if ~strcmp(state,'Mixed') && ~strcmp(epoch_str,'Pre')
+            j=getidx(sprintf('Condition_Vehicle:BehaviouralState_%s:InjectionEpoch_%s',state,epoch_str)); 
+            if ~isempty(j), A_veh(j)=1; end
+        end
+        
+        L_avg = L_avg + (A_veh - A_cno);
+    end
+    
+    L_avg = L_avg / n_states;
+    [F, p, ~, df2] = coefTest(final_model, L_avg, 0);
+    est = L_avg*beta;
+    se = sqrt(L_avg*CovB*L_avg');
+    
+    marg_stats = [marg_stats; table(F, p, se)];
+end
+
+marg.F = marg_stats.F;
+marg.pValue = marg_stats.p;
+marg.SE = marg_stats.se;
+marg.q_FDR = fdr_bh(marg.pValue);
+
+fprintf('\n=== Behaviour-Controlled Marginal Effects ===\n');
+disp(marg);
+
+%% 5) Final Marginal Plot
+fprintf('\n--- 5. Generating final marginal effects plot ---\n');
+
+figure('Color','w','Position',[120 120 800 550]);
+errorbar(1:numel(epochs), marg.EMM_CNO, marg.SE, '-o', ...
+         'Color', cno_color, 'LineWidth', 3, 'MarkerSize', 10, ...
+         'MarkerFaceColor', cno_color, 'MarkerEdgeColor', 'white', ...
+         'CapSize', 6, 'DisplayName', 'CNO');
+hold on;
+errorbar(1:numel(epochs), marg.EMM_Vehicle, marg.SE, '-s', ...
+         'Color', vehicle_color, 'LineWidth', 3, 'MarkerSize', 10, ...
+         'MarkerFaceColor', vehicle_color, 'MarkerEdgeColor', 'white', ...
+         'CapSize', 6, 'DisplayName', 'Vehicle');
+
+set(gca, 'FontSize', 14, 'FontName', 'Arial');
+xticks(1:numel(epochs)); 
+xticklabels(epochs_for_plot); 
+xtickangle(45);
+xlabel('Time relative to injection (min)'); 
+ylabel('Mean Multi-Unit Activity (z-scored)');
+title('Behavioural State-Controlled Marginal Effects');
+legend('Location', 'best', 'Box', 'off');
+grid on; box on;
+hold off;
+
+fprintf('\n--- ANALYSIS COMPLETE ---\n');
+fprintf('Results saved in workspace variables:\n');
+fprintf('  - final_model: Full LME model\n');
+fprintf('  - out: State-specific contrasts\n');
+fprintf('  - marg: Behaviour-controlled marginal effects\n\n');
+
+%% Helper Function: FDR Correction
+function q = fdr_bh(pvals)
+    % Benjamini-Hochberg FDR correction
+    p = pvals(:); 
+    [p_sorted, sort_ids] = sort(p); 
+    m = numel(p);
+    adj_p_sorted = m * p_sorted ./ (1:m)';
+    adj_p_sorted = cummin(flipud(adj_p_sorted));
+    adj_p_sorted = flipud(adj_p_sorted);
+    q = zeros(m,1); 
+    q(sort_ids) = min(adj_p_sorted, 1);
+end 
+
+%% =========================================================================
+% Calculate and Display Data Point Counts per Condition
+% =========================================================================
+%
+% Description:
+% This script calculates the number of data points (observations) for each
+% unique combination of 'BehaviouralState' and 'InjectionEpoch'. This is
+% useful for understanding the distribution of data across the different
+% conditions in your analysis.
+%
+% Assumes:
+% A table named 'T_loc' exists in the workspace and contains the columns
+% 'BehaviouralState' and 'InjectionEpoch'.
+
+fprintf('--- Calculating data distribution ---\n');
+
+% Check if the table T_loc exists
+if ~exist('T_loc', 'var')
+    error('The data table "T_loc" was not found in the workspace. Please run the data setup section of your main script first.');
+end
+
+% Define the variable names for grouping
+grouping_vars = {'BehaviouralState', 'InjectionEpoch'};
+
+% Use groupcounts to find the number of observations in each category
+data_counts = groupcounts(T_loc, grouping_vars);
+
+% Sort the results for better readability
+% This will sort first by BehaviouralState, then by InjectionEpoch
+data_counts = sortrows(data_counts, grouping_vars);
+
+% Rename the 'GroupCount' column to be more descriptive
+data_counts = renamevars(data_counts, "GroupCount", "NumberOfObservations");
+
+% Display the resulting table in the command window
+fprintf('\n=== Number of Observations per Condition ===\n');
+disp(data_counts);
+
+fprintf('\nCalculation complete. The variable "data_counts" contains the results.\n');
+
+%% =========================================================================
+% %% Plot Raw MUA Time Course (Ignoring Behavioural State)
+% =========================================================================
+%
+% Description:
+% This script calculates and plots the raw, unmodelled mean of Multi-Unit
+% Activity (MUA_mean_z) for the CNO and Vehicle conditions across each
+% injection epoch. It deliberately ignores behavioural state to demonstrate
+% how the opposing effects of the drug during different behaviours can
+% mask the overall impact when data is pooled.
+%
+% Assumes:
+% A table named 'T_loc' exists in the workspace and contains the columns
+% 'Condition', 'InjectionEpoch', and 'MUA_mean_z'.
+
+fprintf('--- Plotting raw MUA time course, ignoring behaviour ---\n');
+
+% Check if the table T_loc exists
+if ~exist('T_loc', 'var')
+    error('The data table "T_loc" was not found in the workspace. Please run the data setup section first.');
+end
+
+% Define the variables for grouping
+grouping_vars = {'InjectionEpoch', 'Condition'};
+
+% Calculate the mean and standard error of the mean (SEM) for each group
+% 'sem' is a function that calculates standard error (std(x)/sqrt(length(x)))
+summary_stats = grpstats(T_loc, grouping_vars, {'mean', 'sem'}, 'DataVars', 'MUA_mean_z');
+
+% Extract the data for CNO and Vehicle conditions
+cno_data = summary_stats(summary_stats.Condition == 'CNO', :);
+vehicle_data = summary_stats(summary_stats.Condition == 'Vehicle', :);
+
+% Define plot labels and colors
+epochs_for_plot = {'Pre','0-60','60-120','120-180','180-240','240-300','>300'};
+cno_color = [0.8500 0.3250 0.0980]; 
+vehicle_color = [0 0.4470 0.7410]; 
+
+% --- Create the Plot ---
+figure('Color','w','Position',[200 200 800 550]);
+hold on;
+
+% Plot CNO data with error bars (SEM)
+errorbar(1:height(cno_data), cno_data.mean_MUA_mean_z, cno_data.sem_MUA_mean_z, '-o', ...
+         'Color', cno_color, 'LineWidth', 2.5, 'MarkerSize', 10, ...
+         'MarkerFaceColor', cno_color, 'CapSize', 6, 'DisplayName', 'CNO');
+
+% Plot Vehicle data with error bars (SEM)
+errorbar(1:height(vehicle_data), vehicle_data.mean_MUA_mean_z, vehicle_data.sem_MUA_mean_z, '-s', ...
+         'Color', vehicle_color, 'LineWidth', 2.5, 'MarkerSize', 10, ...
+         'MarkerFaceColor', vehicle_color, 'CapSize', 6, 'DisplayName', 'Vehicle');
+
+hold off;
+
+% --- Customize Plot Appearance ---
+set(gca, 'FontSize', 14, 'FontName', 'Arial');
+xticks(1:numel(epochs_for_plot)); 
+xticklabels(epochs_for_plot); 
+xtickangle(45);
+xlabel('Time relative to injection (min)'); 
+ylabel('Mean Multi-Unit Activity (z-scored)');
+title('Raw MUA Time Course (All Behaviours Pooled)');
+legend('Location', 'best', 'Box', 'off');
+grid on; box on;
+ax = gca;
+ax.YAxis.Exponent = 0; % Prevent scientific notation on y-axis
+
+fprintf('\nPlotting complete.\n');
