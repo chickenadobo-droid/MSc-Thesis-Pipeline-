@@ -1,6 +1,7 @@
 ### MSc Thesis Electrophysiological and Behavioural Annalysis Pipeline 
 
 OVERVIEW
+
 This repository contains the complete MATLAB analysis pipeline developed for my MSc thesis. Te scripts are designed to process, align, and analyse simultaneous electrophysiological recordings (Multi-Unit Activity, Local Field Potential) and behavioural tracking data to investigate the effects of chemogenetic manipulations.
 
 The core of the analysis involves
@@ -15,7 +16,8 @@ iv) Data Visualisation: Generation of figures to display the results, including 
 
 This code is provided so that the analysis can be fully reproduced and understood.
 
-** Repository Structure
+REPOSITORY STRUCTURE
+
 The pipeline is organised into distinct sections:
 
 PositionExtraction/
