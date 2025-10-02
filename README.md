@@ -1,4 +1,4 @@
-### MSc Thesis Electrophysiological and Behavioural Annalysis Pipeline 
+### Electrophysiological and Behavioural Annalysis Pipeline 
 
 OVERVIEW
 
