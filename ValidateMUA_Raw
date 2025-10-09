@@ -1,0 +1,248 @@
+%% ========================================================================
+% SCRIPT FOR MUA VALIDATION
+% =========================================================================
+% PURPOSE:
+% This script replicates the MUA calculation for a single session to validate
+% the 'MUA_mean_z' values in the Final_GLM_Table.
+%
+% LOGIC BASED ON:
+% 1. Data Loading from 'extract_MUA.m' (using Nlx2MatSpike_v3)
+% 2. Processing logic from 'get_mua.m' (smoothing, z-scoring)
+%
+% =========================================================================
+
+%% PHASE 1: SETUP AND DEFINE PATHS
+clc; 
+clear all; 
+close all;
+
+disp('PHASE 1: Setting up paths...');
+
+% --- Define Paths ---
+raw_data_root = 'D:\';
+
+% --- Select the session to validate ---
+animal_name = 'B5'; 
+session_name = 'mouseB5_CNO_091412_day1'; 
+
+% --- Construct the full data path and change directory to it ---
+session_data_path = fullfile(raw_data_root, animal_name, session_name, 'raw');
+disp(['--- Changing directory to: ', session_data_path, ' ---']);
+cd(session_data_path);
+
+% --- Load the Final_GLM_Table and Injection_Times for later comparison ---
+% (You'll need to update these paths to where your files are stored)
+load('C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Final_Table_for_GLM.mat');
+Injection_Times = readtable('C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Injection_Times.csv');
+
+%% PHASE 2: DISCOVER TETRODES, LOAD DATA, AND DEFINE BINS
+disp('PHASE 2: Discovering tetrodes and loading session data...');
+
+% --- Automatically discover which tetrodes are present ---
+ntt_files = dir('TT*.ntt'); % Search in the current directory for .ntt files
+tetrodes_to_process = [];
+for i = 1:length(ntt_files)
+    % Extract the number from the filename (e.g., 'TT7.ntt' -> 7)
+    tetrode_num_str = regexp(ntt_files(i).name, '\d+', 'match');
+    if ~isempty(tetrode_num_str)
+        tetrodes_to_process(end+1) = str2double(tetrode_num_str{1});
+    end
+end
+tetrodes_to_process = sort(tetrodes_to_process);
+
+if isempty(tetrodes_to_process)
+    error('No .ntt files found. Check that the path is correct and you are in the session directory.');
+else
+    disp('Found the following tetrodes to process:');
+    disp(tetrodes_to_process);
+end
+
+% --- Define Parameters ---
+threshold_uV = 100; % The 100uV threshold used in lab pipeline
+
+% --- Load the position and timestamp data ---
+position_base_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+position_data_path = fullfile(position_base_path, animal_name, session_name);
+position_filename = fullfile(position_data_path, 'position_a_s_sc_inj_aligned.mat');
+load(position_filename); % Load from the position data folder
+
+% --- Get key timestamps directly from the loaded structure ---
+injection_time_s    = clean_position.timestamps.injection_s;
+session_start_s     = clean_position.timestamps.session_start_s;
+session_end_s       = clean_position.timestamps.session_end_s;
+
+% --- Convert to microseconds to match the Neuralynx spike timestamps ---
+injection_timestamp_us = injection_time_s * 1e6;
+session_start_us     = session_start_s * 1e6;
+session_end_us       = session_end_s * 1e6;
+
+% --- Create high-resolution time bins using these precise boundaries ---
+time_bins_1ms = session_start_us:1000:session_end_us; 
+
+disp('Successfully defined session boundaries and time bins from the .mat file.');
+
+%% PHASE 3: CROSS-VALIDATE INJECTION TIMESTAMPS
+disp('PHASE 3: Cross-validating injection timestamps...');
+
+% 1. Get injection time from the Injection_Times.csv file
+session_row_csv = strcmp(Injection_Times.Experiment, session_name);
+injection_timestamp_us_from_csv = Injection_Times.Timestamp_us(session_row_csv);
+
+% 2. Get injection time from the loaded clean_position struct
+injection_timestamp_us_from_mat = injection_timestamp_us; 
+
+% 3. Compare the two values
+time_difference_us = abs(injection_timestamp_us_from_csv - injection_timestamp_us_from_mat);
+
+% Allow for a tiny difference (e.g., less than 1ms) due to potential rounding
+if time_difference_us < 1000 
+    disp('SUCCESS: Injection timestamps match between CSV and .mat file.');
+else
+    warning('MISMATCH: Injection timestamps DO NOT match!');
+    fprintf('Timestamp from CSV:      %.0f us\n', injection_timestamp_us_from_csv);
+    fprintf('Timestamp from .mat file: %.0f us\n', injection_timestamp_us_from_mat);
+    fprintf('Difference:              %.0f us\n', time_difference_us);
+end
+
+disp('--- Timestamp check complete. Proceeding to Phase 4... ---');
+
+%% PHASE 4: MAIN LOOP - EXTRACT AND BIN SPIKES
+disp('PHASE 4: Extracting spikes from .ntt files...');
+total_spike_counts = zeros(1, length(time_bins_1ms));
+active_tetrode_count = 0;
+
+for tt = tetrodes_to_process
+    filename = ['TT', num2str(tt), '.ntt'];
+    
+    disp(['Processing ', filename, '...']);
+    
+    % --- Load the spike data ---
+    % We need Timestamps (1) and Params (4) to get the peaks
+    FieldSelectionFlags = [1 0 0 1 0]; 
+    
+    try
+        % First, try to load with the header
+        [timestamps, Params, header] = Nlx2MatSpike(filename, FieldSelectionFlags, 1, 1, []);
+    catch
+        % If that fails, it's likely because there's no header
+        disp('  Warning: Header not found. Retrying without header extraction...');
+        % Call the function again, but this time ask for NO header (0)
+        % and only expect TWO output variables.
+        [timestamps, Params] = Nlx2MatSpike(filename, FieldSelectionFlags, 0, 1, []);
+        header = {}; % Create an empty header so the rest of the script works
+    end
+    
+    % --- Extract Gain (ADBitVolts) ---
+    ADBitVolts = [];
+    if ~isempty(header)
+        for i = 1:length(header)
+            if contains(header{i}, '-ADBitVolts')
+                parts = strsplit(header{i});
+                ADBitVolts = [str2double(parts{2}), str2double(parts{3}), str2double(parts{4}), str2double(parts{5})];
+                break;
+            end
+        end
+    end
+    
+    % If ADBitVolts was not found in the header, use a default value
+    if isempty(ADBitVolts)
+        disp(['  ADBitVolts not found in header, using a default value for ', filename]);
+        % This is a common default value, but may need adjustment if your data is different
+        ADBitVolts = [0.305, 0.305, 0.305, 0.305] * 1e-6; % Example: 0.305 uV per AD unit
+    end
+    
+    active_tetrode_count = active_tetrode_count + 1;
+    
+    % --- Apply Threshold ---
+    % The peak amplitudes are the first 4 rows of the 'Params' variable
+    PeakAmplitudes_AD = Params(1:4, :); 
+    PeakAmplitudes_Volts = PeakAmplitudes_AD .* ADBitVolts'; 
+    
+    max_peak_V = max(abs(PeakAmplitudes_Volts), [], 1);
+    
+    threshold_V = threshold_uV * 1e-6;
+    passing_spikes_idx = find(max_peak_V > threshold_V);
+    
+    passing_timestamps = timestamps(passing_spikes_idx);
+    
+    % --- Bin the spike times ---
+    binned_counts = histc(passing_timestamps, time_bins_1ms);
+    if size(binned_counts, 1) > 1 % Ensure binned_counts is a row vector
+        binned_counts = binned_counts';
+    end
+    total_spike_counts = total_spike_counts + binned_counts;
+end
+
+%% PHASE 5: PROCESS AND BIN TO 1-MINUTE RESOLUTION
+disp('PHASE 5: Smoothing and Binning to 1-minute...');
+
+% --- Average and Smooth the high-resolution signal ---
+avg_spike_counts = total_spike_counts / active_tetrode_count;
+smoothed_mua_1ms = filter(gausswin(60, 15), 1, avg_spike_counts);
+
+% --- BIN THE SMOOTHED SIGNAL INTO 1-MINUTE AVERAGES ---
+minute_bins_us = session_start_us:60*1e6:session_end_us;
+replicated_mua_1min_avg = [];
+for i = 1:length(minute_bins_us)-1
+    start_time = minute_bins_us(i);
+    end_time = minute_bins_us(i+1);
+    idx = find(time_bins_1ms >= start_time & time_bins_1ms < end_time);
+    replicated_mua_1min_avg(i) = mean(smoothed_mua_1ms(idx));
+end
+
+
+%% PHASE 6: Z-SCORE NORMALISATION AND FINAL COMPARISON
+disp('PHASE 6: Z-Scoring the 1-minute data and plotting...');
+
+% --- Z-SCORE THE 1-MINUTE BINNED DATA ---
+replicated_z_scores_1min = zscore(replicated_mua_1min_avg);
+replicated_z_scores_1min = replicated_z_scores_1min(:); % Ensure it's a column
+
+% --- Create a relative time vector for the replicated data ---
+replicated_time_min = (minute_bins_us(1:length(replicated_z_scores_1min)) - injection_timestamp_us) / 60 / 1e6;
+replicated_time_min = round(replicated_time_min(:));
+
+% --- Get original data and its time vector from the table ---
+session_table = Final_GLM_Table(strcmp(Final_GLM_Table.SessionName, session_name), :);
+original_z_scores = session_table.MUA_mean_z;
+original_time_min = session_table.time_min;
+
+% --- ALIGNMENT ---
+[common_time_points, orig_indices, repl_indices] = intersect(original_time_min, replicated_time_min);
+aligned_original_z = original_z_scores(orig_indices);
+aligned_replicated_z = replicated_z_scores_1min(repl_indices);
+
+% For the sanity check plot, we need to align the un-zscored 1-min data
+aligned_smoothed_raw_1min = replicated_mua_1min_avg(repl_indices);
+
+% --- PLOT 1: The "Proof" Plot ---
+figure('Name', ['Validation Proof: ', session_name]);
+scatter(aligned_original_z, aligned_replicated_z);
+xlabel('Original Mean Z-Score');
+ylabel('Replicated Mean Z-Score');
+title('Original vs. Replicated MUA Z-Scores');
+refline(1, 0); 
+grid on;
+correlation = corr(aligned_original_z, aligned_replicated_z, 'rows', 'complete');
+legend(['Correlation = ', num2str(correlation)]);
+
+% --- PLOT 2: The "Sanity Check" Plot ---
+figure('Name', ['Sanity Check: ', session_name]);
+subplot(2, 1, 1);
+plot(common_time_points, aligned_smoothed_raw_1min*1000);
+title('Raw MUA Rate for One Experiment');
+xlabel('Time Relative to Injection (min)');
+ylabel('Mean Firing Rate (Hz)');
+grid on;
+
+subplot(2, 1, 2);
+plot(common_time_points, aligned_original_z, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(common_time_points, aligned_replicated_z, 'r--');
+title('Mean Z-Scored MUA per Minute');
+xlabel('Time Relative to Injection (min)');
+ylabel('Z-Scored MUA');
+legend('Original', 'Replicated');
+grid on;
+
+disp('--- Validation Script Finished ---');
