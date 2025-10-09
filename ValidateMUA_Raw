@@ -6,8 +6,9 @@
 % the 'MUA_mean_z' values in the Final_GLM_Table.
 %
 % LOGIC BASED ON:
-% 1. Data Loading from 'extract_MUA.m' (using Nlx2MatSpike_v3)
-% 2. Processing logic from 'get_mua.m' (smoothing, z-scoring)
+% 1. Data Loading from 'extract_MUA.m' (using Nlx2MatSpike function)
+% 2. Processing logic from 'get_mua.m' (reverse engineers the smoothing, 
+% z-scoring, binning logic to determine the methods used before)
 %
 % =========================================================================
 
