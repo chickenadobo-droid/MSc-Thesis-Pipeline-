@@ -32,7 +32,6 @@ disp(['--- Changing directory to: ', session_data_path, ' ---']);
 cd(session_data_path);
 
 % --- Load the Final_GLM_Table and Injection_Times for later comparison ---
-% (You'll need to update these paths to where your files are stored)
 load('C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Final_Table_for_GLM.mat');
 Injection_Times = readtable('C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Injection_Times.csv');
 
@@ -148,7 +147,7 @@ for tt = tetrodes_to_process
     % If ADBitVolts was not found in the header, use a default value
     if isempty(ADBitVolts)
         disp(['  ADBitVolts not found in header, using a default value for ', filename]);
-        % This is a common default value, but may need adjustment if your data is different
+        % common default value
         ADBitVolts = [0.305, 0.305, 0.305, 0.305] * 1e-6; % Example: 0.305 uV per AD unit
     end
     
