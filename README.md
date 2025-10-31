@@ -32,6 +32,14 @@ glmResults/
 
 This is the final stage of my analysis pipeline. It contains the main statistical analysis scripts that fit the linear mixed-effects models and generate the final figures and post-hoc tables for the thesis.
 
+ValidateMUA_Raw
+
+A validation script that replicates the MUA (Multi-Unit Activity) calculation for a single session to verify the accuracy of the 'MUA_mean_z' values in the Final_GLM_Table. This script follows the logic from extract_MUA.m and get_mua.m to ensure data integrity.
+
+Recalculate_MUA_ZScores_by_ArenaType_Session.m
+
+A specialized script for recalculating z-scores for MUA data. Unlike standard z-scoring across entire sessions, this script calculates z-scores separately for each unique combination of SessionName and ArenaType. This approach accounts for the fact that some sessions are "mixed" with exposure to multiple arena types, and ensures that z-scores are computed within appropriate contextual groupings. The script excludes timepoints where the animal is not in any arena from the calculations.
+
 Recommended Workflow
 The analysis is designed to be run in a sequential manner:
 
