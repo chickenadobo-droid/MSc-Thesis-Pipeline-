@@ -39,4 +39,4 @@ Initial Extraction: Begin by using the scripts within the /PositionExtraction di
 
 Cleaning and Classification: Run the master script within the /PositionCleaning directory. This will apply smoothing, remove artifacts, calculate speed, and classify the data into distinct behavioural states, creating the final processed data files.
 
-Statistical Analysis: Finally, use the scripts in the /glmResults directoryati load the fully processed data andstics an linear mixed-effects Toolbo to test the experimental hypotheses!
+Statistical Analysis: Finally, use the scripts in the /glmResults directory to load the fully processed data and run an linear mixed-effects model to test the experimental hypotheses!
