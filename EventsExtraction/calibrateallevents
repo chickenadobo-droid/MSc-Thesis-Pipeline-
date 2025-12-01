@@ -1,0 +1,89 @@
+function calibrate_all_events(events_path, base_data_dir, calib_dir)
+
+% 1) Load Events
+S = load(events_path, 'Events');
+Events = S.Events;
+exps = fieldnames(Events);
+fprintf('Found %d experiments in Events.\n', numel(exps));
+
+% 2) Loop through all experiments
+for i = 1:numel(exps)
+    exp = exps{i};
+    fprintf('[%d/%d] %s\n', i, numel(exps), exp);
+
+    % --- Calibration file ---
+    calib_file = fullfile(calib_dir, ['calibration_' exp '.mat']);
+    if ~isfile(calib_file)
+        warning('Missing calibration file for %s. Skipping.', exp);
+        continue;
+    end
+    C = load(calib_file);
+    calibration = C.calibration;
+
+    % --- Detect animal folder ---
+    animal = '';
+    if contains(exp,'B5')
+        animal='B5';
+    elseif contains(exp,'B7')
+        animal='B7';
+    elseif contains(exp,'B6')
+        animal='B6_Probe';
+    elseif contains(exp,'D12')
+        animal='D12_Probe';
+    else
+        all_animals = dir(base_data_dir);
+        all_animals = all_animals([all_animals.isdir] & ~startsWith({all_animals.name}, '.'));
+        for a = 1:numel(all_animals)
+            possible_path = fullfile(base_data_dir, all_animals(a).name, exp);
+            if isfolder(possible_path)
+                animal = all_animals(a).name;
+                break;
+            end
+        end
+    end
+    if isempty(animal)
+        warning('Could not find animal folder for %s. Skipping.', exp);
+        continue;
+    end
+
+    % --- Load extracted_position ---
+    pos_path = fullfile(base_data_dir, animal, exp, 'extracted_position.mat');
+    if ~isfile(pos_path)
+        warning('Missing extracted_position.mat for %s. Skipping.', exp);
+        continue;
+    end
+    P = load(pos_path);
+    if ~isfield(P, 'position') || ~all(isfield(P.position, {'x','y','t'}))
+        warning('position.x/y/t missing for %s. Skipping.', exp);
+        continue;
+    end
+
+    % --- Alignment ---
+    px = P.position.x - calibration.sleep_pod_center_px(1);
+    py = P.position.y - calibration.sleep_pod_center_px(2);
+
+    % Flip Y every time
+    py = -py;
+
+    % Rotate if track present
+    if isfield(calibration, 'has_track') && calibration.has_track
+        track_vec = calibration.track_end_px - calibration.track_start_px;
+        track_angle = atan2(track_vec(2), track_vec(1));
+        R = [cos(-track_angle) -sin(-track_angle); sin(-track_angle) cos(-track_angle)];
+        rotated = R * [px(:)'; py(:)'];
+        px = rotated(1,:)';
+        py = rotated(2,:)';
+    end
+
+    % --- Store in Events ---
+    cpp = Events.(exp).position_interp.cm_per_pixel;
+    Events.(exp).position_interp.x_cm = px * cpp;
+    Events.(exp).position_interp.y_cm = py * cpp;
+    Events.(exp).calibration.has_track = calibration.has_track;
+end
+
+% 3) Save
+save(events_path, 'Events', '-v7.3');
+fprintf('\n Calibration + alignment complete. Events.mat updated.\n');
+
+end
