@@ -32,7 +32,8 @@ glmResults/
 
 This is the final stage of my analysis pipeline. It contains the main statistical analysis scripts that fit the linear mixed-effects models and generate the final figures and post-hoc tables for the thesis.
 
-Recommended Workflow
+**Recommended Workflow
+**
 The analysis is designed to be run in a sequential manner:
 
 Initial Extraction: Begin by using the scripts within the /PositionExtraction directory to process raw video files, extract XY coordinates, and define the spatial parameters of the arenas for each session.
