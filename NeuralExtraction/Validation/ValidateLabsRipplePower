@@ -1,0 +1,126 @@
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% validating the ripple_power_z variable in final GLM table 
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%
+% clear; clc;
+fprintf('========================================\n');
+fprintf('VALIDATING: Raw LFP to Final Table (ripple_power_mean)\n');
+fprintf('========================================\n\n');
+
+%% --- 1. Define Paths and Session Info ---
+% Path to the FOLDER containing your final table
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+% Path to the FOLDER containing the raw .ncs files
+data_path = 'D:\B6_Probe\mouseB6_PBS_Day1_Sleep_11_21_2012\raw';
+% Path to your Neuralynx MEX files
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+addpath(neuralynx_path);
+
+% Session details
+session_name = 'mouseB6_PBS_Day1_Sleep_11_21_2012';
+injection_time_sec = 179678.6186;
+ripple_channel = 7; % The correct ripple channel for this session
+
+%% --- 2. Load Your Final Table Data ---
+fprintf('Step 1: Loading data from Final_Table_for_GLM.mat...\n');
+load(fullfile(table_path, 'Final_Table_for_GLM.mat'), 'Final_GLM_Table');
+session_data = Final_GLM_Table(strcmp(Final_GLM_Table.SessionName, session_name), :);
+
+if isempty(session_data)
+    error('Session "%s" not found in the table. Please check session_name.', session_name);
+end
+
+% This is the TARGET data we need to match
+table_ripple_power_mean = session_data.ripple_power_mean;
+table_time_min = session_data.time_min;
+
+fprintf('  Found %d time points for session "%s".\n\n', height(session_data), session_name);
+
+%% --- 3. Load and Process Raw LFP Data  ---
+fprintf('Step 2: Loading and processing raw LFP from CSC%d...\n', ripple_channel);
+
+% --- Load Raw Data & Preprocess---
+filename = fullfile(data_path, sprintf('CSC%d_RateReduced.ncs', ripple_channel));
+[Timestamps, ~, ~, ~, Samples, Header] = ...
+    Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+SR_line = Header{contains(Header, 'SamplingFrequency')};
+original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+Samples_flat = Samples(:);
+timestamps_sec = double(Timestamps) * 1e-6;
+Timestamps_buffer = linspace(0, (511/original_SR), 512);
+Time = NaN(size(Samples_flat));
+for i = 1:512
+    Time(i:512:end) = timestamps_sec + Timestamps_buffer(i);
+end
+CSCtime = (min(Time):(1/original_SR):max(Time))';
+signal_interp = interp1(Time, Samples_flat, CSCtime, 'linear');
+target_SR = 1000;
+CSCraw_full = resample(signal_interp, target_SR, original_SR);
+CSCtime_downsampled = linspace(CSCtime(1), CSCtime(end), numel(CSCraw_full))';
+time_min_aligned_full = (CSCtime_downsampled - injection_time_sec) / 60;
+fprintf('  Preprocessing complete (downsampled to %d Hz).\n', target_SR);
+
+% --- CORRECTED RIPPLE PIPELINE: Z-scored Linear Envelope ---
+fprintf('  Applying z-scored linear envelope pipeline...\n');
+ripple_filter = [125 300];
+filter_order = round(6*target_SR/(ripple_filter(2)-ripple_filter(1)));
+norm_freq = ripple_filter / (target_SR/2);
+b_ripple = fir1(filter_order, norm_freq, 'bandpass');
+ripple_filtered = filtfilt(b_ripple, 1, CSCraw_full);
+
+% 1. Get linear envelope and smooth it
+ripple_envelope = smooth(abs(hilbert(ripple_filtered)), 15)';
+
+% 2. Z-score the entire smoothed envelope
+my_raw_extraction_z = zscore(ripple_envelope);
+
+fprintf('  Pipeline complete. Continuous z-scored signal generated (Mean=%.2f, Std=%.2f).\n\n', ...
+    mean(my_raw_extraction_z), std(my_raw_extraction_z));
+
+%% --- 4. Bin the Data ---
+fprintf('Step 3: Binning the re-created data into 1-minute windows...\n');
+my_binned_mean = nan(height(session_data), 1);
+for i = 1:height(session_data)
+    target_time = table_time_min(i);
+    bin_mask = (time_min_aligned_full >= (target_time - 0.5)) & ...
+               (time_min_aligned_full < (target_time + 0.5));
+               
+    if any(bin_mask)
+        % Take the mean of the z-scored signal within the bin
+        my_binned_mean(i) = mean(my_raw_extraction_z(bin_mask), 'omitnan');
+    end
+end
+fprintf('  Binning complete.\n\n');
+
+
+%% --- 5. Final Comparison and Plot ---
+fprintf('Step 4: Comparing and plotting results...\n');
+valid_idx = ~isnan(my_binned_mean) & ~isnan(table_ripple_power_mean);
+[r_final, ~] = corr(my_binned_mean(valid_idx), table_ripple_power_mean(valid_idx));
+
+fprintf('\n========================================\n');
+fprintf('FINAL CORRELATION: r = %.6f\n', r_final);
+fprintf('========================================\n');
+
+% Create the final validation plot
+figure('Position', [100, 100, 1400, 600]);
+hold on;
+plot(table_time_min, my_binned_mean, 'b-', 'LineWidth', 2, 'DisplayName', 'My Re-created Data (Binned Mean)');
+plot(table_time_min, table_ripple_power_mean, 'r.', 'MarkerSize', 10, 'DisplayName', 'Final Table Data (ripple_power_mean)');
+
+xline(0, 'k--', 'LineWidth', 2, 'HandleVisibility', 'off', 'Label', 'Injection');
+xlabel('Time Relative to Injection (min)', 'FontSize', 12, 'FontWeight', 'bold');
+ylabel('Mean Ripple Amplitude (Z-score)', 'FontSize', 12, 'FontWeight', 'bold');
+title(sprintf('Validation: Raw LFP to Final Table `ripple_power_mean` (r = %.4f)', r_final), ...
+    'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'northeast', 'FontSize', 11);
+grid on;
+set(gca, 'FontSize', 11);
+
+if r_final > 0.99
+    fprintf('\nSUCCESS! The pipeline up to the binning step is validated.\n');
+else
+    fprintf('\nCorrelation is not perfect. The "funny business" may be in the binning step itself.\n');
+end
+
