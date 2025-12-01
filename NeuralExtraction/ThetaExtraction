@@ -1,0 +1,381 @@
+%% ================================================================================
+%% EXTRACT THETA FROM RAW NEURALYNX DATA & ADD TO GLM TABLE
+%% Complete pipeline - no pre-computed files needed
+%% ================================================================================
+
+clear; clc;
+fprintf('========================================\n');
+fprintf('EXTRACTING THETA FROM RAW NEURALYNX DATA\n');
+fprintf('Direct extraction → GLM Table\n');
+fprintf('========================================\n\n');
+
+%% Configuration
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+output_path = fullfile(table_path, 'RawNeuralAnalysis');
+
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+
+% Animal data directories
+base_data_paths = {
+    'D:\B6_Probe';
+    'D:\B5';
+    'D:\B7';
+    'D:\D12_Probe'
+};
+
+% Extraction parameters
+original_SR = 32000;          % Original sampling rate (Hz)
+target_SR = 100;              % Target sampling rate (Hz)
+downsampling_factor = 320;    % 32000 / 100
+theta_low = 4;                % Theta band low frequency (Hz)
+theta_high = 12;              % Theta band high frequency (Hz)
+filter_order = 75;            % FIR filter order
+
+fprintf('Extraction parameters:\n');
+fprintf('  Original SR: %d Hz\n', original_SR);
+fprintf('  Target SR: %d Hz\n', target_SR);
+fprintf('  Theta band: %d-%d Hz\n', theta_low, theta_high);
+fprintf('  Filter order: %d\n\n', filter_order);
+
+%% Load GLM table
+fprintf('Loading GLM table...\n');
+load(fullfile(table_path, 'Final_Table_for_GLM.mat'), 'Final_GLM_Table');
+fprintf('  Loaded: %d rows\n', height(Final_GLM_Table));
+fprintf('  Columns: %s\n\n', strjoin(Final_GLM_Table.Properties.VariableNames, ', '));
+
+%% Get injection times
+fprintf('Loading injection times...\n');
+injection_times = get_injection_times_mine();
+fprintf('  Loaded injection times for %d sessions\n\n', injection_times.Count);
+
+%% Initialize new columns
+fprintf('Initializing theta columns in GLM table...\n');
+Final_GLM_Table.theta_power_z_corrected = nan(height(Final_GLM_Table), 1);
+Final_GLM_Table.theta_power_mean_corrected = nan(height(Final_GLM_Table), 1);
+Final_GLM_Table.theta_power_max_corrected = nan(height(Final_GLM_Table), 1);
+Final_GLM_Table.theta_freq_weighted_mean_corrected = nan(height(Final_GLM_Table), 1);
+
+%% Get unique sessions
+unique_sessions = unique(Final_GLM_Table.SessionName);
+n_sessions = length(unique_sessions);
+fprintf('Found %d unique sessions to process\n\n', n_sessions);
+
+%% Process each session
+fprintf('========================================\n');
+fprintf('PROCESSING SESSIONS\n');
+fprintf('========================================\n\n');
+
+for sess_idx = 1:n_sessions
+    session_name = unique_sessions{sess_idx};
+    
+    fprintf('[%d/%d] %s\n', sess_idx, n_sessions, session_name);
+    
+    %% Check injection time
+    if ~injection_times.isKey(session_name)
+        fprintf('  No injection time - SKIPPING\n\n');
+        continue;
+    end
+    injection_time_sec = injection_times(session_name);
+    
+    %% Find session folder
+    session_path = '';
+    for path_idx = 1:length(base_data_paths)
+        test_path = fullfile(base_data_paths{path_idx}, session_name);
+        if exist(test_path, 'dir')
+            session_path = test_path;
+            break;
+        end
+    end
+    
+    if isempty(session_path)
+        fprintf('  Session folder not found - SKIPPING\n\n');
+        continue;
+    end
+    
+    %% Find CSC file (look for CSC1.ncs first, then any CSC file)
+    csc_file = fullfile(session_path, 'CSC1.ncs');
+    if ~exist(csc_file, 'file')
+        % Look for any CSC file
+        csc_files = dir(fullfile(session_path, 'CSC*.ncs'));
+        if isempty(csc_files)
+            fprintf('  No CSC files found - SKIPPING\n\n');
+            continue;
+        end
+        csc_file = fullfile(session_path, csc_files(1).name);
+        fprintf('  Using: %s\n', csc_files(1).name);
+    else
+        fprintf('  Using: CSC1.ncs\n');
+    end
+    
+    try
+        %% STEP 1: Load raw Neuralynx data
+        fprintf('  Loading raw data...\n');
+        [timestamps, channel_samples, sample_freqs, num_valid_samples, ~, ~] = ...
+            Nlx2MatCSC(csc_file, [1 1 1 1 1], 1, 1, []);
+        
+        % Reshape to 1D vector
+        raw_signal = channel_samples(:)';
+        raw_timestamps = timestamps(:)';
+        
+        fprintf('    Raw samples: %d\n', length(raw_signal));
+        fprintf('    Duration: %.2f hours\n', length(raw_signal) / original_SR / 3600);
+        
+        %% STEP 2: Handle dropped samples
+        fprintf('  Checking for dropped samples...\n');
+        try
+            [dropped_indices, n_dropped] = get_dropped_samples(timestamps, sample_freqs);
+            
+            if n_dropped > 0
+                fprintf('    Found %d dropped samples - interpolating...\n', n_dropped);
+                for i = 1:length(dropped_indices)
+                    drop_idx = dropped_indices(i);
+                    if drop_idx > 1 && drop_idx < length(raw_signal)
+                        raw_signal(drop_idx) = (raw_signal(drop_idx-1) + raw_signal(drop_idx+1)) / 2;
+                    end
+                end
+            else
+                fprintf('    No dropped samples\n');
+            end
+        catch
+            fprintf('    Could not check for dropped samples (continuing anyway)\n');
+        end
+        
+        %% STEP 3: Downsample to 100 Hz
+        fprintf('  Downsampling to %d Hz...\n', target_SR);
+        theta_raw = decimate(raw_signal, downsampling_factor, 'fir');
+        
+        % Create time vector in seconds
+        n_samples = length(theta_raw);
+        theta_time_sec = (0:(n_samples-1)) / target_SR;
+        
+        fprintf('    Downsampled samples: %d\n', n_samples);
+        
+        %% STEP 4: Bandpass filter (4-12 Hz)
+        fprintf('  Applying %d-%d Hz bandpass filter...\n', theta_low, theta_high);
+        
+        nyquist = target_SR / 2;
+        normalized_freqs = [theta_low theta_high] / nyquist;
+        fir_coeffs = fir1(filter_order, normalized_freqs, 'bandpass');
+        theta_filtered = filtfilt(fir_coeffs, 1, theta_raw);
+        
+        %% STEP 5: Hilbert transform (instantaneous amplitude)
+        fprintf('  Computing instantaneous amplitude...\n');
+        analytic_signal = hilbert(theta_filtered);
+        theta_amplitude = abs(analytic_signal);
+        
+        %% STEP 6: Z-score normalization
+        fprintf('  Z-scoring across session...\n');
+        theta_mean = mean(theta_amplitude);
+        theta_std = std(theta_amplitude);
+        theta_zscore = (theta_amplitude - theta_mean) / theta_std;
+        
+        fprintf('    Z-score check: mean=%.4f, std=%.4f\n', ...
+            mean(theta_zscore), std(theta_zscore));
+        
+        %% STEP 7: Instantaneous frequency
+        fprintf('  Computing instantaneous frequency...\n');
+        instantaneous_phase = unwrap(angle(analytic_signal));
+        instantaneous_freq = target_SR / (2*pi) * diff(instantaneous_phase);
+        instantaneous_freq = [instantaneous_freq(1); instantaneous_freq];  % Pad
+        
+        % Filter to theta range
+        instantaneous_freq(instantaneous_freq < theta_low | instantaneous_freq > theta_high) = NaN;
+        
+        %% STEP 8: Convert time to minutes relative to injection
+        fprintf('  Converting to injection-relative time...\n');
+        theta_time_min = (theta_time_sec - injection_time_sec) / 60;
+        
+        fprintf('    Time range: %.1f to %.1f min\n', ...
+            min(theta_time_min), max(theta_time_min));
+        
+        %% STEP 9: Get GLM table rows for this session
+        session_mask = strcmp(Final_GLM_Table.SessionName, session_name);
+        session_data = Final_GLM_Table(session_mask, :);
+        n_bins = height(session_data);
+        existing_time_bins = session_data.time_min;
+        
+        fprintf('  Binning to %d GLM table bins...\n', n_bins);
+        fprintf('    Table time range: %.1f to %.1f min\n', ...
+            min(existing_time_bins), max(existing_time_bins));
+        
+        %% STEP 10: Bin theta data to match GLM table
+        theta_power_z_binned = nan(n_bins, 1);
+        theta_power_mean_binned = nan(n_bins, 1);
+        theta_power_max_binned = nan(n_bins, 1);
+        theta_freq_weighted_binned = nan(n_bins, 1);
+        
+        for i = 1:n_bins
+            target_time = existing_time_bins(i);
+            
+            % Find samples within ±0.5 minutes
+            bin_mask = (theta_time_min >= (target_time - 0.5)) & ...
+                       (theta_time_min < (target_time + 0.5));
+            
+            if sum(bin_mask) > 0
+                % Z-scored power (mean and max)
+                bin_theta_z = theta_zscore(bin_mask);
+                theta_power_z_binned(i) = mean(bin_theta_z, 'omitnan');
+                theta_power_max_binned(i) = max(bin_theta_z);
+                
+                % Raw amplitude (mean)
+                bin_theta_amp = theta_amplitude(bin_mask);
+                theta_power_mean_binned(i) = mean(bin_theta_amp, 'omitnan');
+                
+                % Weighted mean frequency
+                bin_freq = instantaneous_freq(bin_mask);
+                bin_power = theta_amplitude(bin_mask);
+                
+                valid_freq = ~isnan(bin_freq);
+                if sum(valid_freq) > 0
+                    bin_freq_valid = bin_freq(valid_freq);
+                    bin_power_valid = bin_power(valid_freq);
+                    
+                    theta_freq_weighted_binned(i) = ...
+                        sum(bin_freq_valid .* bin_power_valid) / sum(bin_power_valid);
+                end
+            end
+        end
+        
+        %% STEP 11: Store in GLM table
+        Final_GLM_Table.theta_power_z_corrected(session_mask) = theta_power_z_binned;
+        Final_GLM_Table.theta_power_mean_corrected(session_mask) = theta_power_mean_binned;
+        Final_GLM_Table.theta_power_max_corrected(session_mask) = theta_power_max_binned;
+        Final_GLM_Table.theta_freq_weighted_mean_corrected(session_mask) = theta_freq_weighted_binned;
+        
+        % Report
+        fprintf('   Complete! Coverage:\n');
+        fprintf('    Power Z:     %.1f%%\n', 100 * sum(~isnan(theta_power_z_binned)) / n_bins);
+        fprintf('    Power Mean:  %.1f%%\n', 100 * sum(~isnan(theta_power_mean_binned)) / n_bins);
+        fprintf('    Power Max:   %.1f%%\n', 100 * sum(~isnan(theta_power_max_binned)) / n_bins);
+        fprintf('    Frequency:   %.1f%%\n\n', 100 * sum(~isnan(theta_freq_weighted_binned)) / n_bins);
+        
+    catch ME
+        fprintf('  !! ERROR: %s\n', ME.message);
+        fprintf('    Stack: %s\n\n', ME.stack(1).name);
+        continue;
+    end
+end
+
+%% Summary Statistics
+fprintf('========================================\n');
+fprintf('SUMMARY STATISTICS\n');
+fprintf('========================================\n\n');
+
+fprintf('theta_power_z_corrected:\n');
+fprintf('  Mean: %.4f (should be ~0)\n', ...
+    mean(Final_GLM_Table.theta_power_z_corrected, 'omitnan'));
+fprintf('  Std:  %.4f (should be 0.3-1.0)\n', ...
+    std(Final_GLM_Table.theta_power_z_corrected, 'omitnan'));
+fprintf('  Coverage: %.1f%%\n\n', ...
+    100 * sum(~isnan(Final_GLM_Table.theta_power_z_corrected)) / height(Final_GLM_Table));
+
+fprintf('theta_power_mean_corrected:\n');
+fprintf('  Mean: %.2f μV\n', ...
+    mean(Final_GLM_Table.theta_power_mean_corrected, 'omitnan'));
+fprintf('  Std:  %.2f μV\n', ...
+    std(Final_GLM_Table.theta_power_mean_corrected, 'omitnan'));
+fprintf('  Coverage: %.1f%%\n\n', ...
+    100 * sum(~isnan(Final_GLM_Table.theta_power_mean_corrected)) / height(Final_GLM_Table));
+
+fprintf('theta_power_max_corrected:\n');
+fprintf('  Mean: %.4f\n', ...
+    mean(Final_GLM_Table.theta_power_max_corrected, 'omitnan'));
+fprintf('  Std:  %.4f\n', ...
+    std(Final_GLM_Table.theta_power_max_corrected, 'omitnan'));
+fprintf('  Coverage: %.1f%%\n\n', ...
+    100 * sum(~isnan(Final_GLM_Table.theta_power_max_corrected)) / height(Final_GLM_Table));
+
+fprintf('theta_freq_weighted_mean_corrected:\n');
+fprintf('  Mean: %.4f Hz\n', ...
+    mean(Final_GLM_Table.theta_freq_weighted_mean_corrected, 'omitnan'));
+fprintf('  Std:  %.4f Hz\n', ...
+    std(Final_GLM_Table.theta_freq_weighted_mean_corrected, 'omitnan'));
+fprintf('  Range: [%.2f, %.2f] Hz\n', ...
+    min(Final_GLM_Table.theta_freq_weighted_mean_corrected), ...
+    max(Final_GLM_Table.theta_freq_weighted_mean_corrected));
+fprintf('  Coverage: %.1f%%\n\n', ...
+    100 * sum(~isnan(Final_GLM_Table.theta_freq_weighted_mean_corrected)) / height(Final_GLM_Table));
+
+%% Save
+fprintf('========================================\n');
+fprintf('SAVING\n');
+fprintf('========================================\n\n');
+
+% Backup
+backup_file = fullfile(table_path, sprintf('Final_Table_for_GLM_BACKUP_%s.mat', ...
+    datestr(now, 'yyyymmdd_HHMMSS')));
+copyfile(fullfile(table_path, 'Final_Table_for_GLM.mat'), backup_file);
+fprintf('✓ Backup saved:\n  %s\n\n', backup_file);
+
+% Save new table
+output_file = fullfile(table_path, 'Final_Table_for_GLM_CORRECTED_THETA.mat');
+save(output_file, 'Final_GLM_Table', '-v7.3');
+fprintf('Updated table saved:\n  %s\n\n', output_file);
+
+fprintf('New columns:\n');
+fprintf('  - theta_power_z_corrected\n');
+fprintf('  - theta_power_mean_corrected\n');
+fprintf('  - theta_power_max_corrected\n');
+fprintf('  - theta_freq_weighted_mean_corrected\n\n');
+
+%% Create validation plot
+fprintf('========================================\n');
+fprintf('CREATING VALIDATION PLOT\n');
+fprintf('========================================\n\n');
+
+for sess_idx = 1:n_sessions
+    session_name = unique_sessions{sess_idx};
+    session_mask = strcmp(Final_GLM_Table.SessionName, session_name);
+    
+    if sum(~isnan(Final_GLM_Table.theta_power_z_corrected(session_mask))) > 10
+        session_data = Final_GLM_Table(session_mask, :);
+        
+        figure('Position', [100, 100, 1600, 1000]);
+        
+        % Power Z
+        subplot(4, 1, 1);
+        plot(session_data.time_min, session_data.theta_power_z_corrected, 'b-', 'LineWidth', 2);
+        hold on;
+        xline(0, 'k--', 'Injection', 'LineWidth', 2);
+        ylabel('Theta Power (Z)');
+        title(sprintf('Session: %s', strrep(session_name, '_', '\_')));
+        grid on;
+        
+        % Power Mean
+        subplot(4, 1, 2);
+        plot(session_data.time_min, session_data.theta_power_mean_corrected, 'r-', 'LineWidth', 2);
+        hold on;
+        xline(0, 'k--', 'Injection', 'LineWidth', 2);
+        ylabel('Theta Amplitude (μV)');
+        grid on;
+        
+        % Power Max
+        subplot(4, 1, 3);
+        plot(session_data.time_min, session_data.theta_power_max_corrected, 'm-', 'LineWidth', 2);
+        hold on;
+        xline(0, 'k--', 'Injection', 'LineWidth', 2);
+        ylabel('Theta Power Max (Z)');
+        grid on;
+        
+        % Frequency
+        subplot(4, 1, 4);
+        plot(session_data.time_min, session_data.theta_freq_weighted_mean_corrected, 'g-', 'LineWidth', 2);
+        hold on;
+        xline(0, 'k--', 'Injection', 'LineWidth', 2);
+        yline(mean(session_data.theta_freq_weighted_mean_corrected, 'omitnan'), 'k--', ...
+            sprintf('Mean=%.2f Hz', mean(session_data.theta_freq_weighted_mean_corrected, 'omitnan')));
+        xlabel('Time from Injection (min)');
+        ylabel('Theta Frequency (Hz)');
+        ylim([4 12]);
+        grid on;
+        
+        saveas(gcf, fullfile(output_path, sprintf('Theta_Validation_%s.png', session_name)));
+        fprintf('Saved validation plot\n\n');
+        break;
+    end
+end
+
+fprintf('========================================\n');
+fprintf('COMPLETE!\n');
+fprintf('========================================\n\n');
+fprintf('3. Use Final_Table_for_GLM_CORRECTED_THETA.mat for analysis\n\n');
