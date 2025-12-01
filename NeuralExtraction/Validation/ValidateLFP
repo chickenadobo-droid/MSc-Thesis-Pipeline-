@@ -1,0 +1,2636 @@
+%% ========================================================================
+% SCRIPT TO GENERATE "GROUND TRUTH" LFP VALIDATION FIGURES
+% =========================================================================
+% PURPOSE:
+% This script first loads a short snippet of raw LFP data from a single,
+% high-quality recording file to visually illustrate the methods used for 
+% ripple and theta analysis.
+% In the second section, it then extrapolates that logic to a full 
+% session to validate minute by minute bin values to the data used to get 
+% the results from GLM.
+% =========================================================================
+
+%% PHASE 1: SETUP AND DEFINE PARAMETERS
+clc;
+clear all;
+close all;
+
+disp('PHASE 1: Setting up paths and parameters...');
+
+% --- Add Neuralynx functions to the MATLAB Path ---
+nlx_functions_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Data\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+addpath(nlx_functions_path);
+
+% --- Define Main Paths and Target File ---
+raw_data_root = 'D:\';
+animal_name = 'B5';
+session_name = 'mouseB5_CNO_091412_day1';
+csc_filename = 'CSC4_RateReduced.ncs'; % The file with 1000hz sampling rate (already identified as 'best' CSC channel) 
+
+% --- Construct the full path to the target LFP file ---
+csc_filepath = fullfile(raw_data_root, animal_name, session_name, 'raw', csc_filename);
+
+if ~exist(csc_filepath, 'file')
+    error('Target CSC file not found. Check the path: %s', csc_filepath);
+end
+
+% --- Define Analysis Parameters ---
+ripple_band = [125 300];
+theta_band  = [4 12];
+snippet_duration_sec = 10; % How many seconds of data to plot
+
+%% PHASE 2: LOAD A SNIPPET OF RAW LFP DATA
+disp('PHASE 2: Loading a short segment of raw LFP data...');
+
+% --- CORRECTED CALL 1: Load just the timestamps and the header ---
+% We ask for Timestamps ([1 0 0 0 0]) and Header (1), so we expect 2 outputs.
+[Timestamps_full, Header] = Nlx2MatCSC(csc_filepath, [1 0 0 0 0], 1, 1, []);
+
+% Extract Sampling Rate and Gain from the header
+ADBitVolts_line = Header(contains(Header, '-ADBitVolts'));
+ADBitVolts = str2double(ADBitVolts_line{1}(13:end));
+SamplingFrequency_line = Header(contains(Header, '-SamplingFrequency'));
+fs = str2double(SamplingFrequency_line{1}(20:end));
+
+% Define the start and end time for our snippet (e.g., 10 minutes into the recording)
+start_time_us = Timestamps_full(1) + (10 * 60 * 1e6);
+end_time_us = start_time_us + (snippet_duration_sec * 1e6);
+
+% We ask for Timestamps (1) and Samples (5), so we expect 2 outputs. No header needed (0).
+[Timestamps, Samples] = Nlx2MatCSC(csc_filepath, [1 0 0 0 1], 0, 4, [start_time_us, end_time_us]);
+
+% Convert the raw samples to microvolts (uV)
+lfp_snippet_uV = double(Samples(:)') * ADBitVolts * 1e6; % Multiply by 1e6 to get uV
+time_vector_sec = linspace(0, snippet_duration_sec, length(lfp_snippet_uV));
+
+%% PHASE 3: GENERATE RIPPLE VALIDATION FIGURE
+disp('PHASE 3: Creating Ripple validation figure...');
+
+% --- Process the snippet for ripple analysis ---
+[b, a] = butter(4, ripple_band / (fs/2), 'bandpass');
+filtered_ripple = filtfilt(b, a, lfp_snippet_uV);
+ripple_power = abs(hilbert(filtered_ripple)).^2;
+
+% --- Create the plot ---
+figure('Name', 'Ripple Analysis Ground Truth', 'Position', [100 100 800 600]);
+sgtitle('Ripple Detection Pipeline', 'FontSize', 16, 'FontWeight', 'bold');
+
+% Plot A: Raw LFP
+subplot(3, 1, 1);
+plot(time_vector_sec, lfp_snippet_uV, 'k');
+title('A: Raw LFP Signal');
+ylabel('Voltage (\muV)');
+grid on; xlim([0 snippet_duration_sec]);
+
+% Plot B: Ripple-Filtered Signal
+subplot(3, 1, 2);
+plot(time_vector_sec, filtered_ripple, 'Color', [0.85 0.33 0.1]);
+title('B: Signal Filtered in Ripple Band (125-300 Hz)');
+ylabel('Voltage (\muV)');
+grid on; xlim([0 snippet_duration_sec]);
+
+% Plot C: Power Envelope
+subplot(3, 1, 3);
+plot(time_vector_sec, ripple_power, 'Color', [0.49 0.18 0.56]);
+title('C: Instantaneous Ripple Power (Squared Hilbert Envelope)');
+ylabel('Power (a.u.)');
+xlabel('Time (s)');
+grid on; xlim([0 snippet_duration_sec]);
+
+
+%% PHASE 4: THETA VALIDATION FIGURE
+disp('PHASE 4: Creating Theta validation figure...');
+
+% --- Process the snippet for theta analysis ---
+[b, a] = butter(4, theta_band / (fs/2), 'bandpass');
+filtered_theta = filtfilt(b, a, lfp_snippet_uV);
+
+% --- Calculate Power Spectral Density (PSD) for the snippet ---
+[Pxx, F] = pwelch(lfp_snippet_uV, hamming(fs), 0, [], fs);
+
+% --- Create the plot ---
+figure('Name', 'Theta Analysis Ground Truth', 'Position', [200 200 800 600]);
+sgtitle('Theta Analysis Pipeline', 'FontSize', 16, 'FontWeight', 'bold');
+
+% Plot A: Raw LFP (same as before)
+subplot(3, 1, 1);
+plot(time_vector_sec, lfp_snippet_uV, 'k');
+title('A: Raw LFP Signal');
+ylabel('Voltage (\muV)');
+grid on; xlim([0 snippet_duration_sec]);
+
+% Plot B: Theta-Filtered Signal
+subplot(3, 1, 2);
+plot(time_vector_sec, filtered_theta, 'Color', [0 0.45 0.74]);
+title('B: Signal Filtered in Theta Band (6-12 Hz)');
+ylabel('Voltage (\muV)');
+xlabel('Time (s)');
+grid on; xlim([0 snippet_duration_sec]);
+
+% Plot C: Power Spectrum
+subplot(3, 1, 3);
+plot(F, 10*log10(Pxx), 'k', 'LineWidth', 1.5);
+title('C: Power Spectral Density (PSD)');
+ylabel('Power/Frequency (dB/Hz)');
+xlabel('Frequency (Hz)');
+grid on;
+xlim([0 40]); % Focus on the lower frequencies to see the theta peak
+
+disp('--- Analysis 1 Complete ---');
+
+% %% ========================================================================
+% %  SECTION 2: LFP POWER VALIDATION FOR THE FULL SESSION (RIPPLE & THETA)
+% % =========================================================================
+
+%% Theta-Ripple Validation Pipeline
+% Extracts metrics for comparison with pre-extracted data:
+%   - ripple_events, ripple_power_mean, ripple_power_max
+%   - theta_freq_weighted_mean, theta_power_max, theta_power_z
+% For: mouseB6_CNO_Day1_Sleep_11_20_2012
+
+clear; clc;
+
+%% Setup Paths
+data_path = 'D:\B6_Probe\mouseB6_CNO_Day1_Sleep_11_20_2012\raw';
+output_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawNeuralAnalysis\psd';
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+
+% Add Neuralynx functions to path
+addpath(neuralynx_path);
+
+% Create output directory if it doesn't exist
+if ~exist(output_path, 'dir')
+    mkdir(output_path);
+end
+
+% Save original directory
+original_dir = pwd;
+cd(data_path);
+
+%% Define Parameters
+parameters.theta_filter = [6 12];           % Hz - theta band
+parameters.ripple_filter = [125 300];       % Hz - ripple band 
+parameters.ripple_threshold = 3;            % SD above mean for ripple detection
+parameters.ripple_min_duration = 0.015;     % seconds (15 ms minimum)
+parameters.ripple_merge_threshold = 0.02;   % seconds (merge events within 20 ms)
+
+fprintf('=== Theta-Ripple Validation Pipeline ===\n');
+fprintf('Data: %s\n', data_path);
+fprintf('Output: %s\n\n', output_path);
+
+%% Step 1: Identify available channels
+fprintf('Step 1: Identifying available channels...\n');
+
+LFP_files = dir('*.ncs');
+dupl_LFP_files = dir('CSC*_*.ncs');
+
+% Handle files - check if RateReduced or standard
+ncs_extension = '';
+use_rate_reduced = false;
+
+if ~isempty(dupl_LFP_files)
+    % Check for CSC1 in both formats
+    CSC1_standard = dir('CSC1.ncs');
+    CSC1_reduced = dir('CSC1_RateReduced.ncs');
+    
+    if ~isempty(CSC1_standard) && ~isempty(CSC1_reduced)
+        % Both exist - use the RateReduced (has header info)
+        fprintf('  Using _RateReduced.ncs files (contains header information)\n');
+        ncs_extension = '_RateReduced';
+        use_rate_reduced = true;
+        LFP_files = dupl_LFP_files;
+    elseif ~isempty(CSC1_reduced)
+        fprintf('  Using _RateReduced.ncs files\n');
+        ncs_extension = '_RateReduced';
+        use_rate_reduced = true;
+        LFP_files = dupl_LFP_files;
+    else
+        fprintf('  Using standard .ncs files\n');
+        ncs_extension = '';
+        use_rate_reduced = false;
+        LFP_files(contains({LFP_files.name}, '_')) = [];
+    end
+else
+    fprintf('  Using standard .ncs files\n');
+end
+
+% Extract channel numbers
+available_channels = [];
+for c = 1:length(LFP_files)
+    LFP_filename = LFP_files(c).name;
+    
+    % Extract channel number - works for both CSC1.ncs and CSC1_RateReduced.ncs
+    if use_rate_reduced
+        name_split = strsplit(LFP_filename, {'CSC', '_RateReduced.ncs'});
+    else
+        name_split = strsplit(LFP_filename, {'CSC', '.ncs'});
+    end
+    
+    if length(name_split) >= 2 && ~isempty(name_split{2})
+        CSC_number = str2double(name_split{2});
+        if ~isnan(CSC_number)
+            available_channels(c) = CSC_number;
+        end
+    end
+end
+available_channels = available_channels(available_channels > 0);
+available_channels = unique(available_channels);
+fprintf('  Found %d channels: %s\n\n', length(available_channels), mat2str(available_channels));
+
+%% Step 2: Extract PSD for theta and ripple band analysis
+fprintf('Step 2: Extracting Power Spectral Density...\n');
+
+% PSD parameters
+new_SR = 1000;            % Target sampling rate
+nfft = 1024;              % FFT points
+win = hanning(nfft);      % Hanning window
+noverlap = [];            % 50% overlap
+
+all_PSD = struct([]);
+
+for q = 1:length(available_channels)
+    ch = available_channels(q);
+    
+    % Construct filename based on format
+    if isempty(ncs_extension)
+        filename = sprintf('CSC%d.ncs', ch);
+    else
+        filename = sprintf('CSC%d%s.ncs', ch, ncs_extension);
+    end
+    
+    fprintf('  [%d/%d] CSC%d...', q, length(available_channels), ch);
+    
+    try
+        % Read Neuralynx file
+        [Timestamps, ~, ~, ~, Samples, Header] = ...
+            Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+        
+        % Get sampling rate
+        SR_line = Header{contains(Header, 'SamplingFrequency')};
+        original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+        
+        % Process samples
+        Samples_flat = Samples(:);
+        downsampling_factor = round(original_SR / new_SR);
+        CSC_resampled = resample(Samples_flat, 1, downsampling_factor);
+        
+        % Calculate PSD
+        [Pxx, F] = pwelch(CSC_resampled, win, noverlap, nfft, new_SR);
+        
+        % Store results
+        all_PSD(q).CSCchannel = ch;
+        all_PSD(q).filename = filename;
+        all_PSD(q).original_SR = original_SR;
+        all_PSD(q).SR = new_SR;
+        all_PSD(q).PSD = 10*log10(Pxx');
+        all_PSD(q).PSD_F = F;
+        
+        fprintf(' Done\n');
+        
+    catch ME
+        fprintf(' ERROR: %s\n', ME.message);
+        continue;
+    end
+end
+
+save(fullfile(output_path, 'PSD_data.mat'), 'all_PSD', 'parameters');
+fprintf('  Saved: PSD_data.mat\n\n');
+
+%% Step 3: Determine best theta and ripple channels
+fprintf('Step 3: Identifying best theta and ripple channels...\n');
+
+% Find frequency indices
+theta_idx = find(all_PSD(1).PSD_F >= parameters.theta_filter(1) & ...
+                 all_PSD(1).PSD_F <= parameters.theta_filter(2));
+ripple_idx = find(all_PSD(1).PSD_F >= parameters.ripple_filter(1) & ...
+                  all_PSD(1).PSD_F <= parameters.ripple_filter(2));
+
+% Calculate relative power for each channel
+for thisCSC = 1:length(all_PSD)
+    % Theta power
+    theta_psd = all_PSD(thisCSC).PSD(theta_idx);
+    theta_baseline = 0.5 * (theta_psd(1) + theta_psd(end));
+    theta_power(thisCSC) = median(theta_psd) - theta_baseline;
+    
+    % Ripple power
+    ripple_psd = all_PSD(thisCSC).PSD(ripple_idx);
+    ripple_baseline = 0.5 * (ripple_psd(1) + ripple_psd(end));
+    ripple_power(thisCSC) = median(ripple_psd) - ripple_baseline;
+end
+
+% Find best channels
+[max_theta, idx_theta] = max(theta_power);
+[max_ripple, idx_ripple] = max(ripple_power);
+
+best_channels.bestCSC_theta = all_PSD(idx_theta).CSCchannel;
+best_channels.bestCSC_ripple = all_PSD(idx_ripple).CSCchannel;
+best_channels.theta_power = theta_power;
+best_channels.ripple_power = ripple_power;
+
+% Find channel with high theta and low ripple
+norm_theta = theta_power / max(theta_power);
+norm_ripple = ripple_power / max(ripple_power);
+norm_ripple(norm_ripple < 0) = 0;
+[~, idx_diff] = max(norm_theta - norm_ripple);
+best_channels.bestCSC_ThetaRippleDiff = all_PSD(idx_diff).CSCchannel;
+
+save(fullfile(output_path, 'best_CSC.mat'), 'best_channels');
+
+fprintf('  Best Theta Channel:       CSC%d (power = %.2f dB)\n', best_channels.bestCSC_theta, max_theta);
+fprintf('  Best Ripple Channel:      CSC%d (power = %.2f dB)\n', best_channels.bestCSC_ripple, max_ripple);
+fprintf('  Best Theta-Low-Ripple:    CSC%d\n\n', best_channels.bestCSC_ThetaRippleDiff);
+
+%% Step 4: Extract and filter theta and ripple channels
+fprintf('Step 4: Extracting theta and ripple data...\n');
+
+channels_to_extract = unique([best_channels.bestCSC_theta, best_channels.bestCSC_ripple]);
+target_SR = 1000;
+
+for jj = 1:length(channels_to_extract)
+    ch = channels_to_extract(jj);
+    
+    % Construct filename based on format
+    if isempty(ncs_extension)
+        filename = sprintf('CSC%d.ncs', ch);
+    else
+        filename = sprintf('CSC%d%s.ncs', ch, ncs_extension);
+    end
+    
+    fprintf('  Processing CSC%d...\n', ch);
+    
+    % Read data
+    [Timestamps, ~, ~, ~, Samples, Header] = ...
+        Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+    
+    SR_line = Header{contains(Header, 'SamplingFrequency')};
+    original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+    
+    % Process
+    Samples_flat = Samples(:);
+    downsampling_factor = round(original_SR / target_SR);
+    CSCraw = resample(Samples_flat, 1, downsampling_factor);
+    
+    % Store basic info
+    CSC(jj).channel = ch;
+    CSC(jj).filename = filename;
+    CSC(jj).original_SR = original_SR;
+    CSC(jj).SR = target_SR;
+    CSC(jj).CSCraw = CSCraw;
+    CSC(jj).CSCtime = (0:(length(CSCraw)-1))' / target_SR;
+    
+    % Filter theta if this is theta channel
+    if ch == best_channels.bestCSC_theta
+        fprintf('    Filtering theta (%.0f-%.0f Hz)...\n', parameters.theta_filter);
+        filter_order = round(6*target_SR/(parameters.theta_filter(2)-parameters.theta_filter(1)));
+        norm_freq = parameters.theta_filter / (target_SR/2);
+        b_theta = fir1(filter_order, norm_freq, 'bandpass');
+        
+        CSC(jj).theta = filtfilt(b_theta, 1, CSCraw);
+        CSC(jj).theta_envelope = abs(hilbert(CSC(jj).theta));
+        CSC(jj).theta_power_raw = CSC(jj).theta_envelope;  % Raw power before z-scoring
+        CSC(jj).theta_power_z = zscore(CSC(jj).theta_envelope);  % Z-scored power
+        CSC(jj).channel_label = 'best_theta';
+    end
+    
+    % Filter ripple if this is ripple channel
+    if ch == best_channels.bestCSC_ripple
+        fprintf('    Filtering ripple (%.0f-%.0f Hz)...\n', parameters.ripple_filter);
+        filter_order = round(6*target_SR/(parameters.ripple_filter(2)-parameters.ripple_filter(1)));
+        norm_freq = parameters.ripple_filter / (target_SR/2);
+        b_ripple = fir1(filter_order, norm_freq, 'bandpass');
+        
+        CSC(jj).ripple = filtfilt(b_ripple, 1, CSCraw);
+        CSC(jj).ripple_envelope = abs(hilbert(CSC(jj).ripple));
+        CSC(jj).ripple_power_raw = CSC(jj).ripple_envelope;  % Raw power
+        CSC(jj).ripple_power_z = zscore(smooth(CSC(jj).ripple_envelope, 15));  % Z-scored, smoothed
+        CSC(jj).channel_label = 'best_ripple';
+    end
+end
+
+save(fullfile(output_path, 'extracted_CSC.mat'), 'CSC', '-v7.3');
+fprintf('  Saved: extracted_CSC.mat\n\n');
+
+%% Step 5: Calculate theta metrics
+fprintf('Step 5: Calculating theta metrics...\n');
+
+% Find theta channel in CSC struct
+theta_idx = find([CSC.channel] == best_channels.bestCSC_theta);
+
+if ~isempty(theta_idx)
+    % Get theta PSD for frequency calculations
+    ch_idx = find([all_PSD.CSCchannel] == best_channels.bestCSC_theta);
+    theta_freq_range = all_PSD(ch_idx).PSD_F >= parameters.theta_filter(1) & ...
+                       all_PSD(ch_idx).PSD_F <= parameters.theta_filter(2);
+    theta_freqs = all_PSD(ch_idx).PSD_F(theta_freq_range);
+    theta_psd_vals = all_PSD(ch_idx).PSD(theta_freq_range);
+    
+    % Convert from log to linear for weighted mean
+    theta_psd_linear = 10.^(theta_psd_vals/10);
+    
+    % Calculate weighted mean frequency
+    theta_metrics.freq_weighted_mean = sum(theta_freqs .* theta_psd_linear') / sum(theta_psd_linear);
+    
+    % Power metrics
+    theta_metrics.power_max = max(CSC(theta_idx).theta_power_raw);
+    theta_metrics.power_mean = mean(CSC(theta_idx).theta_power_raw);
+    theta_metrics.power_std = std(CSC(theta_idx).theta_power_raw);
+    theta_metrics.power_z = CSC(theta_idx).theta_power_z;  % Full time series
+    theta_metrics.power_raw = CSC(theta_idx).theta_power_raw;  % Full time series
+    theta_metrics.time = CSC(theta_idx).CSCtime;
+    
+    fprintf('  Theta frequency (weighted mean): %.2f Hz\n', theta_metrics.freq_weighted_mean);
+    fprintf('  Theta power max: %.2f\n', theta_metrics.power_max);
+    fprintf('  Theta power mean: %.2f\n', theta_metrics.power_mean);
+else
+    fprintf('  Warning: Theta channel not found in extracted CSC\n');
+    theta_metrics = [];
+end
+
+%% Step 6: Detect ripple events and calculate metrics
+fprintf('\nStep 6: Detecting ripple events and calculating metrics...\n');
+
+% Find ripple channel
+ripple_idx = find([CSC.channel] == best_channels.bestCSC_ripple);
+
+if ~isempty(ripple_idx)
+    % Ripple detection using z-scored power
+    ripple_z = CSC(ripple_idx).ripple_power_z;
+    ripple_raw = CSC(ripple_idx).ripple_power_raw;
+    time = CSC(ripple_idx).CSCtime;
+    SR = CSC(ripple_idx).SR;
+    
+    % Detect threshold crossings
+    above_threshold = ripple_z > parameters.ripple_threshold;
+    
+    % Find event boundaries
+    diff_thresh = diff([0; above_threshold; 0]);
+    event_starts = find(diff_thresh == 1);
+    event_ends = find(diff_thresh == -1) - 1;
+    
+    % Calculate event properties
+    num_events = length(event_starts);
+    ripple_events = [];
+    
+    for i = 1:num_events
+        event.start_idx = event_starts(i);
+        event.end_idx = event_ends(i);
+        event.start_time = time(event_starts(i));
+        event.end_time = time(event_ends(i));
+        event.duration = event.end_time - event.start_time;
+        event.peak_idx = event_starts(i) - 1 + find(ripple_z(event_starts(i):event_ends(i)) == ...
+                                                     max(ripple_z(event_starts(i):event_ends(i))), 1);
+        event.peak_time = time(event.peak_idx);
+        event.peak_power_z = ripple_z(event.peak_idx);
+        event.peak_power_raw = ripple_raw(event.peak_idx);
+        event.mean_power_raw = mean(ripple_raw(event_starts(i):event_ends(i)));
+        event.max_power_raw = max(ripple_raw(event_starts(i):event_ends(i)));
+        
+        ripple_events = [ripple_events; event];
+    end
+    
+    % Filter by duration
+    valid_duration = [ripple_events.duration] >= parameters.ripple_min_duration;
+    ripple_events = ripple_events(valid_duration);
+    
+    % Merge events close together
+    if length(ripple_events) > 1
+        to_merge = diff([ripple_events.start_time]) < parameters.ripple_merge_threshold;
+        
+        merged_events = [];
+        i = 1;
+        while i <= length(ripple_events)
+            if i < length(ripple_events) && to_merge(i)
+                % Merge this event with next
+                merged_event = ripple_events(i);
+                merged_event.end_idx = ripple_events(i+1).end_idx;
+                merged_event.end_time = ripple_events(i+1).end_time;
+                merged_event.duration = merged_event.end_time - merged_event.start_time;
+                
+                % Recalculate peak
+                segment = ripple_z(merged_event.start_idx:merged_event.end_idx);
+                [~, peak_offset] = max(segment);
+                merged_event.peak_idx = merged_event.start_idx + peak_offset - 1;
+                merged_event.peak_time = time(merged_event.peak_idx);
+                merged_event.peak_power_z = ripple_z(merged_event.peak_idx);
+                merged_event.peak_power_raw = ripple_raw(merged_event.peak_idx);
+                merged_event.mean_power_raw = mean(ripple_raw(merged_event.start_idx:merged_event.end_idx));
+                merged_event.max_power_raw = max(ripple_raw(merged_event.start_idx:merged_event.end_idx));
+                
+                merged_events = [merged_events; merged_event];
+                i = i + 2;
+            else
+                merged_events = [merged_events; ripple_events(i)];
+                i = i + 1;
+            end
+        end
+        ripple_events = merged_events;
+    end
+    
+    % Summary metrics
+    ripple_metrics.events = ripple_events;
+    ripple_metrics.num_events = length(ripple_events);
+    ripple_metrics.event_rate = length(ripple_events) / (time(end) / 60);  % events per minute
+    ripple_metrics.mean_duration = mean([ripple_events.duration]);
+    ripple_metrics.power_mean_all = [ripple_events.mean_power_raw];
+    ripple_metrics.power_max_all = [ripple_events.max_power_raw];
+    ripple_metrics.power_mean_avg = mean([ripple_events.mean_power_raw]);
+    ripple_metrics.power_max_avg = mean([ripple_events.max_power_raw]);
+    
+    fprintf('  Detected %d ripple events\n', ripple_metrics.num_events);
+    fprintf('  Event rate: %.2f events/min\n', ripple_metrics.event_rate);
+    fprintf('  Mean duration: %.3f s\n', ripple_metrics.mean_duration);
+    fprintf('  Mean ripple power (avg across events): %.2f\n', ripple_metrics.power_mean_avg);
+    fprintf('  Max ripple power (avg across events): %.2f\n', ripple_metrics.power_max_avg);
+else
+    fprintf('  Warning: Ripple channel not found in extracted CSC\n');
+    ripple_metrics = [];
+end
+
+%% Step 7: Save validation metrics
+fprintf('\nStep 7: Saving validation metrics...\n');
+
+validation = struct();
+validation.theta_metrics = theta_metrics;
+validation.ripple_metrics = ripple_metrics;
+validation.best_channels = best_channels;
+validation.parameters = parameters;
+validation.processing_date = datestr(now);
+
+save(fullfile(output_path, 'validation_metrics.mat'), 'validation');
+fprintf('  Saved: validation_metrics.mat\n\n');
+
+%% Summary
+fprintf('========================================\n');
+fprintf('VALIDATION METRICS EXTRACTED\n');
+fprintf('========================================\n');
+fprintf('\nTheta Metrics:\n');
+fprintf('  - theta_freq_weighted_mean: %.2f Hz\n', theta_metrics.freq_weighted_mean);
+fprintf('  - theta_power_max: %.2f\n', theta_metrics.power_max);
+fprintf('  - theta_power_z: [%d samples] (time series)\n', length(theta_metrics.power_z));
+fprintf('\nRipple Metrics:\n');
+fprintf('  - ripple_events: %d detected\n', ripple_metrics.num_events);
+fprintf('  - ripple_power_mean: %.2f (avg across events)\n', ripple_metrics.power_mean_avg);
+fprintf('  - ripple_power_max: %.2f (avg across events)\n', ripple_metrics.power_max_avg);
+fprintf('\nOutput files:\n');
+fprintf('  1. PSD_data.mat\n');
+fprintf('  2. best_CSC.mat\n');
+fprintf('  3. extracted_CSC.mat\n');
+fprintf('  4. validation_metrics.mat  <- COMPARE THIS TO THE GLM DATA\n');
+fprintf('\n========================================\n');
+
+% Return to original directory
+cd(original_dir);
+
+%% 
+% =======================================================================
+% Validation Comparison Script
+% Compares raw extraction with pre-extracted data in Final_GLM_Table
+% ========================================================================
+
+%% Check Timing of Different NCS Files
+% Determines which .ncs files contain the experimental data around injection
+
+clear; clc;
+
+data_path = 'D:\B6_Probe\mouseB6_CNO_Day1_Sleep_11_20_2012\raw';
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+addpath(neuralynx_path);
+
+cd(data_path);
+
+% Load injection time
+injection_times = readtable('C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Injection_Times.csv');
+session_injection = injection_times(strcmp(injection_times.SessionName, 'CNO_Day1_Sleep_11_20_2012'), :);
+
+% Use microseconds column (more precise)
+injection_time_us = session_injection.Timestamp_us;
+injection_time_sec = injection_time_us * 1e-6;
+
+fprintf('Injection time from CSV:\n');
+fprintf('  Timestamp_us: %.0f microseconds\n', injection_time_us);
+fprintf('  Timestamp_s:  %.2f seconds (from CSV)\n', session_injection.Timestamp_s);
+fprintf('  Converted:    %.2f seconds (from us column)\n', injection_time_sec);
+fprintf('  In minutes:   %.2f minutes\n\n', injection_time_sec/60);
+fprintf('Target time range (from your table): -74 to +266 minutes\n');
+fprintf('In seconds: %.1f to %.1f\n\n', injection_time_sec - 74*60, injection_time_sec + 266*60);
+
+% Check both file types
+file_types = {
+    'CSC1.ncs', 'Standard';
+    'CSC1_RateReduced.ncs', 'RateReduced'
+};
+
+fprintf('========================================\n');
+fprintf('CHECKING FILE TIMING\n');
+fprintf('========================================\n\n');
+
+for f = 1:size(file_types, 1)
+    filename = file_types{f, 1};
+    file_label = file_types{f, 2};
+    
+    if ~exist(filename, 'file')
+        fprintf('%s: FILE NOT FOUND\n\n', file_label);
+        continue;
+    end
+    
+    fprintf('%s (%s):\n', file_label, filename);
+    
+    try
+        % Read timestamps and header - Nlx2MatCSC returns [Timestamps, ChannelNumbers, SampleFrequencies, NumberOfValidSamples, Samples, Header]
+        % With [1 0 0 0 0] selection, we get [Timestamps, Header]
+        [Timestamps, Header] = Nlx2MatCSC(filename, [1 0 0 0 0], 1, 1, []);
+        
+        if isempty(Timestamps)
+            fprintf('  ERROR: No timestamps found\n\n');
+            continue;
+        end
+        
+        % Timestamps are in microseconds, convert to seconds
+        time_sec = double(Timestamps) * 1e-6;
+        
+        % File info
+        file_info = dir(filename);
+        
+        fprintf('  File size: %.1f MB\n', file_info.bytes / 1e6);
+        fprintf('  Number of records: %d\n', length(Timestamps));
+        fprintf('  First timestamp: %.0f us (%.2f sec, %.2f min)\n', Timestamps(1), time_sec(1), time_sec(1)/60);
+        fprintf('  Last timestamp:  %.0f us (%.2f sec, %.2f min)\n', Timestamps(end), time_sec(end), time_sec(end)/60);
+        fprintf('  Time range: %.1f to %.1f seconds\n', min(time_sec), max(time_sec));
+        fprintf('  Duration: %.1f hours (%.1f minutes)\n', (max(time_sec) - min(time_sec))/3600, (max(time_sec) - min(time_sec))/60);
+        
+        % Check if injection time falls within this file
+        contains_injection = (injection_time_sec >= min(time_sec)) && (injection_time_sec <= max(time_sec));
+        
+        if contains_injection
+            fprintf('  ✓ CONTAINS INJECTION TIME!\n');
+            
+            % Calculate time range relative to injection
+            time_min_rel = (time_sec - injection_time_sec) / 60;
+            fprintf('  Time range relative to injection: %.1f to %.1f minutes\n', min(time_min_rel), max(time_min_rel));
+            
+            % Check overlap with table data
+            table_start = -74;
+            table_end = 266;
+            
+            overlap_start = max(min(time_min_rel), table_start);
+            overlap_end = min(max(time_min_rel), table_end);
+            
+            has_overlap = overlap_end > overlap_start;
+            
+            if has_overlap
+                fprintf('  ✓ OVERLAPS WITH TABLE DATA: %.1f to %.1f minutes\n', overlap_start, overlap_end);
+                fprintf('  Coverage: %.1f%% of table time range\n', 100*(overlap_end - overlap_start)/(table_end - table_start));
+                fprintf('\n  >>> USE THIS FILE TYPE FOR VALIDATION <<<\n');
+            else
+                fprintf('  ✗ No overlap with table data range\n');
+            end
+        else
+            fprintf('  ✗ Does NOT contain injection time\n');
+            fprintf('  Injection is at %.1f sec, but file is %.1f to %.1f sec\n', ...
+                injection_time_sec, min(time_sec), max(time_sec));
+            
+            % Show how far off it is
+            if injection_time_sec > max(time_sec)
+                fprintf('  File ends %.1f minutes BEFORE injection\n', (injection_time_sec - max(time_sec))/60);
+            else
+                fprintf('  File starts %.1f minutes AFTER injection\n', (min(time_sec) - injection_time_sec)/60);
+            end
+        end
+        
+        fprintf('\n');
+        
+    catch ME
+        fprintf('  ERROR: %s\n\n', ME.message);
+    end
+end
+
+fprintf('========================================\n');
+fprintf('RECOMMENDATION\n');
+fprintf('========================================\n');
+fprintf('Use the file type that:\n');
+fprintf('  1. Contains the injection time (%.1f sec)\n', injection_time_sec);
+fprintf('  2. Overlaps with your table data (-74 to +266 min)\n');
+fprintf('  3. Has the largest file size (more data = better)\n');
+
+%% =======================================================================
+% Validation Comparison Script
+% Compares raw extraction with pre-extracted data in Final_GLM_Table
+% For Theta and Ripple Power 
+% ========================================================================
+
+%% Theta-Ripple Validation Pipeline
+% Extracts metrics for comparison with pre-extracted data:
+%   - ripple_events, ripple_power_mean, ripple_power_max
+%   - theta_freq_weighted_mean, theta_power_max, theta_power_z
+% For: mouseB6_CNO_Day1_Sleep_11_20_2012
+
+%% Complete Extraction Pipeline with Dropped Samples Correction
+% This matches the lab's pipeline exactly
+
+clear; clc;
+
+%% Paths
+data_path = 'D:\B6_Probe\mouseB6_PBS_Day1_Sleep_11_21_2012\raw';
+output_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawNeuralAnalysis\psd';
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+
+addpath(neuralynx_path);
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+
+original_dir = pwd;
+cd(data_path);
+
+%% Parameters
+parameters.theta_filter = [6 12];
+parameters.ripple_filter = [125 300];
+
+fprintf('========================================\n');
+fprintf('COMPLETE EXTRACTION WITH DROPPED SAMPLES\n');
+fprintf('========================================\n\n');
+
+%% STEP 1: Extract dropped samples
+fprintf('Step 1: Extracting dropped samples...\n');
+
+% Always regenerate to make sure it's correct
+fprintf('  Creating dropped samples from CSC1_RateReduced.ncs\n');
+
+filename = 'CSC1_RateReduced.ncs';
+[Timestamps, ~, ~, NumberOfValidSamples, Samples, Header] = ...
+    Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+
+SR_line = Header{contains(Header, 'SamplingFrequency')};
+SR = str2double(regexp(SR_line, '\d+', 'match'));
+
+Samples_flat = Samples(:);
+timestamps = double(Timestamps) * 1e-6;
+
+% Interpolate timestamps within each record
+Timestamps_buffer = linspace(0, (511/SR), 512);
+Time = NaN(size(Samples_flat));
+for i = 1:512
+    Time(i:512:end) = timestamps + Timestamps_buffer(i);
+end
+
+% Find dropped frames and samples
+dropped_frames = find(NumberOfValidSamples < 512);
+dropped_samples = [];
+if ~isempty(dropped_frames)
+    for i = 1:length(dropped_frames)
+        frame_idx = dropped_frames(i);
+        invalid_samples_in_frame = (NumberOfValidSamples(frame_idx)+1):512;
+        global_indices = (frame_idx-1)*512 + invalid_samples_in_frame;
+        dropped_samples = [dropped_samples global_indices];
+    end
+    error_times = Time(dropped_samples);
+else
+    error_times = [];
+end
+
+save('extracted_dropped_samples.mat', 'dropped_samples', 'error_times', 'Time', '-v7.3');
+fprintf('  Dropped frames: %d\n', length(dropped_frames));
+fprintf('  Dropped samples: %d (%.2f%% of data)\n\n', ...
+    length(dropped_samples), 100*length(dropped_samples)/length(Time));
+
+%% STEP 2: Extract best channels for theta and ripple
+fprintf('Step 2: Extracting theta (CSC28) and ripple (CSC4) with dropped sample correction...\n');
+
+channels = [28, 4];
+channel_labels = {'theta', 'ripple'};
+target_SR = 1000;
+
+for jj = 1:length(channels)
+    ch = channels(jj);
+    label = channel_labels{jj};
+    
+    filename = sprintf('CSC%d_RateReduced.ncs', ch);
+    fprintf('  [%d/%d] Processing %s (CSC%d)...\n', jj, length(channels), label, ch);
+    
+    % Read data
+    [Timestamps, ~, ~, NumberOfValidSamples, Samples, Header] = ...
+        Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+    
+    SR_line = Header{contains(Header, 'SamplingFrequency')};
+    original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+    
+    % Flatten
+    Samples_flat = Samples(:);
+    timestamps = double(Timestamps) * 1e-6;
+    
+    % Interpolate timestamps (same as lab pipeline)
+    Timestamps_buffer = linspace(0, (511/original_SR), 512);
+    Time = NaN(size(Samples_flat));
+    for i = 1:512
+        Time(i:512:end) = timestamps + Timestamps_buffer(i);
+    end
+    
+    % CRITICAL: Remove dropped samples
+    fprintf('    Removing %d dropped samples...\n', length(dropped_samples));
+    Time(dropped_samples) = [];
+    Samples_flat(dropped_samples) = [];
+    
+    % Create regular time grid and interpolate
+    CSCtime = (min(Time):(1/original_SR):max(Time))';
+    signal_interp = interp1(Time, Samples_flat, CSCtime, 'linear');
+    
+    % Downsample to 1000 Hz
+    downsampling_factor = round(original_SR / target_SR);
+    CSCraw = resample(signal_interp, 1, downsampling_factor);
+    CSCtime_resampled = downsample(CSCtime, downsampling_factor);
+    
+    % Store
+    CSC(jj).channel = ch;
+    CSC(jj).filename = filename;
+    CSC(jj).original_SR = original_SR;
+    CSC(jj).SR = target_SR;
+    CSC(jj).downsampling_factor = downsampling_factor;
+    CSC(jj).CSCraw = CSCraw;
+    CSC(jj).CSCtime = CSCtime_resampled;
+    CSC(jj).channel_label = label;
+    
+    % Apply filtering based on channel type
+    if strcmp(label, 'theta')
+        fprintf('    Filtering theta (6-12 Hz)...\n');
+        filter_width = parameters.theta_filter;
+        filter_order = round(6*target_SR/(filter_width(2)-filter_width(1)));
+        norm_freq = filter_width / (target_SR/2);
+        b_theta = fir1(filter_order, norm_freq, 'bandpass');
+        
+        CSC(jj).theta = filtfilt(b_theta, 1, CSCraw);
+        CSC(jj).theta_envelope = abs(hilbert(CSC(jj).theta));
+        CSC(jj).theta_power_raw = CSC(jj).theta_envelope;
+        CSC(jj).theta_power_z = zscore(CSC(jj).theta_envelope);
+        
+    elseif strcmp(label, 'ripple')
+        fprintf('    Filtering ripple (125-300 Hz)...\n');
+        filter_width = parameters.ripple_filter;
+        filter_order = round(6*target_SR/(filter_width(2)-filter_width(1)));
+        norm_freq = filter_width / (target_SR/2);
+        b_ripple = fir1(filter_order, norm_freq, 'bandpass');
+        
+        CSC(jj).ripple = filtfilt(b_ripple, 1, CSCraw);
+        CSC(jj).ripple_envelope = smooth(abs(hilbert(CSC(jj).ripple)), 15)';
+        CSC(jj).ripple_power_raw = CSC(jj).ripple_envelope;
+        CSC(jj).ripple_power_z = zscore(CSC(jj).ripple_envelope);
+    end
+    
+    fprintf('    Done! Recording length: %.1f minutes\n', CSCtime_resampled(end)/60);
+end
+
+% Save
+save(fullfile(output_path, 'extracted_CSC_with_drops.mat'), 'CSC', '-v7.3');
+fprintf('\nSaved: extracted_CSC_with_drops.mat\n\n');
+
+%% STEP 3: Quick validation check
+fprintf('========================================\n');
+fprintf('VALIDATION CHECK\n');
+fprintf('========================================\n\n');
+
+theta_idx = 1;
+ripple_idx = 2;
+
+fprintf('THETA (CSC28):\n');
+fprintf('  Recording length: %.1f min\n', CSC(theta_idx).CSCtime(end)/60);
+fprintf('  Raw CSC range: %.1f to %.1f μV\n', min(CSC(theta_idx).CSCraw), max(CSC(theta_idx).CSCraw));
+fprintf('  Filtered range: %.1f to %.1f μV\n', min(CSC(theta_idx).theta), max(CSC(theta_idx).theta));
+fprintf('  Envelope range: %.1f to %.1f\n', min(CSC(theta_idx).theta_envelope), max(CSC(theta_idx).theta_envelope));
+fprintf('  Z-score: mean=%.4f, std=%.4f\n\n', mean(CSC(theta_idx).theta_power_z), std(CSC(theta_idx).theta_power_z));
+
+fprintf('RIPPLE (CSC4):\n');
+fprintf('  Recording length: %.1f min\n', CSC(ripple_idx).CSCtime(end)/60);
+fprintf('  Raw CSC range: %.1f to %.1f μV\n', min(CSC(ripple_idx).CSCraw), max(CSC(ripple_idx).CSCraw));
+fprintf('  Filtered range: %.1f to %.1f μV\n', min(CSC(ripple_idx).ripple), max(CSC(ripple_idx).ripple));
+fprintf('  Envelope range: %.1f to %.1f\n', min(CSC(ripple_idx).ripple_envelope), max(CSC(ripple_idx).ripple_envelope));
+fprintf('  Z-score: mean=%.4f, std=%.4f\n\n', mean(CSC(ripple_idx).ripple_power_z), std(CSC(ripple_idx).ripple_power_z));
+
+fprintf('========================================\n');
+fprintf('EXTRACTION COMPLETE WITH DROPPED SAMPLES\n');
+fprintf('========================================\n');
+fprintf('Now run the validation comparison script using:\n');
+fprintf('  extracted_CSC_with_drops.mat\n\n');
+
+cd(original_dir);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% FINAL VALIDATION SCRIPT
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clear; clc;
+
+%% Paths and parameters
+data_path = 'D:\B6_Probe\mouseB6_PBS_Day1_Sleep_11_21_2012\raw';
+output_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawNeuralAnalysis\psd';
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+session_name = 'mouseB6_PBS_Day1_Sleep_11_21_2012';
+
+addpath(neuralynx_path);
+original_dir = pwd;
+cd(data_path);
+
+% Load table to get exact time range
+load(fullfile(table_path, 'Final_Table_for_GLM.mat'));
+session_data = Final_GLM_Table(strcmp(Final_GLM_Table.SessionName, session_name), :);
+
+injection_time_sec = 179678.6186;
+
+fprintf('========================================\n');
+fprintf('EXTRACT TABLE PERIOD ONLY\n');
+fprintf('========================================\n\n');
+fprintf('Table time range: %.1f to %.1f minutes\n', ...
+    min(session_data.time_min), max(session_data.time_min));
+fprintf('Injection time: %.2f sec\n\n', injection_time_sec);
+
+%% Extract theta (CSC28) and ripple (CSC4)
+channels = [28, 4];
+channel_labels = {'theta', 'ripple'};
+target_SR = 1000;
+
+for jj = 1:length(channels)
+    ch = channels(jj);
+    label = channel_labels{jj};
+    
+    filename = sprintf('CSC%d_RateReduced.ncs', ch);
+    fprintf('Processing %s (CSC%d)...\n', label, ch);
+    
+    % Read full recording
+    [Timestamps, ~, ~, ~, Samples, Header] = ...
+        Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+    
+    SR_line = Header{contains(Header, 'SamplingFrequency')};
+    original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+    
+    % Process
+    Samples_flat = Samples(:);
+    timestamps_sec = double(Timestamps) * 1e-6;
+    
+    % Interpolate timestamps
+    Timestamps_buffer = linspace(0, (511/original_SR), 512);
+    Time = NaN(size(Samples_flat));
+    for i = 1:512
+        Time(i:512:end) = timestamps_sec + Timestamps_buffer(i);
+    end
+    
+    % Downsample
+    downsampling_factor = round(original_SR / target_SR);
+    CSCraw = resample(Samples_flat, 1, downsampling_factor);
+    Time_downsampled = downsample(Time, downsampling_factor);
+    
+    % Convert to injection-aligned time
+    time_min_aligned = (Time_downsampled - injection_time_sec) / 60;
+    
+    % CRITICAL: Extract only the table time period
+    table_start = min(session_data.time_min);
+    table_end = max(session_data.time_min);
+    
+    period_mask = time_min_aligned >= table_start & time_min_aligned <= table_end;
+    
+    CSCraw_period = CSCraw(period_mask);
+    time_period = time_min_aligned(period_mask);
+    
+    fprintf('  Full recording: %.1f min\n', length(CSCraw)/target_SR/60);
+    fprintf('  Table period: %.1f to %.1f min (%.1f min duration)\n', ...
+        table_start, table_end, length(CSCraw_period)/target_SR/60);
+    
+    % Store
+    CSC(jj).channel = ch;
+    CSC(jj).SR = target_SR;
+    CSC(jj).CSCraw = CSCraw_period;
+    CSC(jj).CSCtime_min = time_period;
+    CSC(jj).channel_label = label;
+    
+    % Apply filtering
+    if strcmp(label, 'theta')
+        fprintf('  Filtering theta (6-12 Hz)...\n');
+        filter_width = [6 12];
+        filter_order = round(6*target_SR/(filter_width(2)-filter_width(1)));
+        norm_freq = filter_width / (target_SR/2);
+        b_theta = fir1(filter_order, norm_freq, 'bandpass');
+        
+        CSC(jj).theta = filtfilt(b_theta, 1, CSCraw_period);
+        CSC(jj).theta_envelope = abs(hilbert(CSC(jj).theta));
+        
+        % Z-score on TABLE PERIOD ONLY
+        CSC(jj).theta_power_z = zscore(CSC(jj).theta_envelope);
+        
+        fprintf('  Theta z-score: mean=%.4f, std=%.4f\n', ...
+            mean(CSC(jj).theta_power_z), std(CSC(jj).theta_power_z));
+        
+    elseif strcmp(label, 'ripple')
+        fprintf('  Filtering ripple (125-300 Hz)...\n');
+        filter_width = [125 300];
+        filter_order = round(6*target_SR/(filter_width(2)-filter_width(1)));
+        norm_freq = filter_width / (target_SR/2);
+        b_ripple = fir1(filter_order, norm_freq, 'bandpass');
+        
+        CSC(jj).ripple = filtfilt(b_ripple, 1, CSCraw_period);
+        CSC(jj).ripple_envelope = smooth(abs(hilbert(CSC(jj).ripple)), 15)';
+        
+        % Z-score on TABLE PERIOD ONLY
+        CSC(jj).ripple_power_z = zscore(CSC(jj).ripple_envelope);
+        
+        fprintf('  Ripple z-score: mean=%.4f, std=%.4f\n', ...
+            mean(CSC(jj).ripple_power_z), std(CSC(jj).ripple_power_z));
+        fprintf('  Ripple envelope range: %.2f to %.2f\n', ...
+            min(CSC(jj).ripple_envelope), max(CSC(jj).ripple_envelope));
+    end
+    fprintf('\n');
+end
+
+% Save
+save(fullfile(output_path, 'extracted_CSC_table_period.mat'), 'CSC', '-v7.3');
+fprintf('Saved: extracted_CSC_table_period.mat\n\n');
+
+%% Bin per minute and compare
+fprintf('========================================\n');
+fprintf('BINNING AND COMPARISON\n');
+fprintf('========================================\n\n');
+
+theta_idx = 1;
+ripple_idx = 2;
+
+min_edges = floor(min(session_data.time_min)):1:ceil(max(session_data.time_min));
+n_bins = length(min_edges) - 1;
+
+theta_power_mean_binned = nan(n_bins, 1);
+theta_power_max_binned = nan(n_bins, 1);
+ripple_power_mean_binned = nan(n_bins, 1);
+ripple_power_max_binned = nan(n_bins, 1);
+
+% Calculate per-minute statistics (RAW envelope, not z-scored)
+for i = 1:n_bins
+    % Theta
+    bin_mask_theta = CSC(theta_idx).CSCtime_min >= min_edges(i) & ...
+                     CSC(theta_idx).CSCtime_min < min_edges(i+1);
+    if sum(bin_mask_theta) > 0
+        theta_power_mean_binned(i) = mean(CSC(theta_idx).theta_envelope(bin_mask_theta));
+        theta_power_max_binned(i) = max(CSC(theta_idx).theta_envelope(bin_mask_theta));
+    end
+    
+    % Ripple
+    bin_mask_ripple = CSC(ripple_idx).CSCtime_min >= min_edges(i) & ...
+                      CSC(ripple_idx).CSCtime_min < min_edges(i+1);
+    if sum(bin_mask_ripple) > 0
+        ripple_power_mean_binned(i) = mean(CSC(ripple_idx).ripple_envelope(bin_mask_ripple));
+        ripple_power_max_binned(i) = max(CSC(ripple_idx).ripple_envelope(bin_mask_ripple));
+    end
+end
+
+% Z-score the per-minute MEAN values (this is theta_power_z in your table)
+theta_power_z_binned = zscore(theta_power_mean_binned);
+ripple_power_z_binned = zscore(ripple_power_mean_binned);
+
+bin_centers = min_edges(1:end-1) + 0.5;
+
+%% Compare statistics
+fprintf('THETA:\n');
+fprintf('  Raw mean/min:    mean=%.2f, std=%.2f\n', ...
+    nanmean(theta_power_mean_binned), nanstd(theta_power_mean_binned));
+fprintf('  Raw max/min:     mean=%.2f, std=%.2f\n', ...
+    nanmean(theta_power_max_binned), nanstd(theta_power_max_binned));
+fprintf('  Raw z (from mean): mean=%.4f, std=%.4f\n', ...
+    nanmean(theta_power_z_binned), nanstd(theta_power_z_binned));
+fprintf('  Table max:       mean=%.2f, std=%.2f\n', ...
+    mean(session_data.theta_power_max, 'omitnan'), std(session_data.theta_power_max, 'omitnan'));
+fprintf('  Table z:         mean=%.4f, std=%.4f\n\n', ...
+    mean(session_data.theta_power_z, 'omitnan'), std(session_data.theta_power_z, 'omitnan'));
+
+fprintf('RIPPLE:\n');
+fprintf('  Raw mean/min:    mean=%.2f, std=%.2f\n', ...
+    nanmean(ripple_power_mean_binned), nanstd(ripple_power_mean_binned));
+fprintf('  Raw max/min:     mean=%.2f, std=%.2f\n', ...
+    nanmean(ripple_power_max_binned), nanstd(ripple_power_max_binned));
+fprintf('  Raw z (from mean): mean=%.4f, std=%.4f\n', ...
+    nanmean(ripple_power_z_binned), nanstd(ripple_power_z_binned));
+fprintf('  Table max:       mean=%.2f, std=%.2f\n', ...
+    mean(session_data.ripple_power_max, 'omitnan'), std(session_data.ripple_power_max, 'omitnan'));
+fprintf('  Table z:         mean=%.4f, std=%.4f\n\n', ...
+    mean(session_data.ripple_power_z, 'omitnan'), std(session_data.ripple_power_z, 'omitnan'));
+
+%% Plot comparison
+figure('Position', [100, 100, 1400, 600]);
+
+subplot(2,1,1);
+plot(bin_centers, theta_power_z_binned, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(session_data.time_min, session_data.theta_power_z, 'r.', 'MarkerSize', 6);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Theta Power (z-score)');
+title('Theta: Z-scored on Table Period Only');
+legend({'Raw extraction', 'Table'}, 'Location', 'best');
+grid on;
+
+subplot(2,1,2);
+plot(bin_centers, ripple_power_z_binned, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(session_data.time_min, session_data.ripple_power_z, 'r.', 'MarkerSize', 6);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (z-score)');
+title('Ripple: Z-scored on Table Period Only');
+legend({'Raw extraction', 'Table'}, 'Location', 'best');
+grid on;
+
+saveas(gcf, fullfile(output_path, 'validation_table_period_only.png'));
+fprintf('Figure saved: validation_table_period_only.png\n\n');
+
+fprintf('========================================\n');
+fprintf('SUMMARY\n');
+fprintf('========================================\n');
+fprintf('✓ Extracted only table time period\n');
+fprintf('✓ Z-scored within that period (mean=0, std=1)\n');
+fprintf('✓ Should now match table statistics\n\n');
+
+if nanstd(ripple_power_z_binned) < 0.2
+    fprintf('⚠️  WARNING: Ripple still appears flat!\n');
+    fprintf('   This suggests CSC4 may not have ripple activity in this session.\n');
+    fprintf('   Consider checking other channels or ripple detection method.\n');
+end
+
+cd(original_dir);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% FULL PIPELINE RIPPLE AND THETA VALIDATION                                                 %
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Complete Validation Pipeline for PBS Day1 Session
+% 1. Extract dropped samples
+% 2. Calculate PSD for all channels
+% 3. Determine best theta and ripple channels
+% 4. Extract and validate
+
+clear; clc;
+
+%% Paths and parameters
+data_path = 'D:\B6_Probe\mouseB6_CNO_Day2_Sleep_11_26_2012\raw';
+output_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawNeuralAnalysis\psd';
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+
+session_name = 'mouseB6_CNO_Day2_Sleep_11_26_2012';
+injection_time_sec = 614247.3267;
+
+addpath(neuralynx_path);
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+
+original_dir = pwd;
+cd(data_path);
+
+fprintf('========================================\n');
+fprintf('COMPLETE VALIDATION: %s\n', session_name);
+fprintf('========================================\n\n');
+
+% %% STEP 1: Extract dropped samples
+% fprintf('Step 1: Extracting dropped samples...\n');
+% 
+% filename = fullfile(data_path, 'CSC1_RateReduced.ncs');
+% [Timestamps, ~, ~, NumberOfValidSamples, Samples, Header] = ...
+%     Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+% 
+% SR_line = Header{contains(Header, 'SamplingFrequency')};
+% SR = str2double(regexp(SR_line, '\d+', 'match'));
+% 
+% Samples_flat = Samples(:);
+% timestamps = double(Timestamps) * 1e-6;
+% 
+% % Interpolate timestamps
+% Timestamps_buffer = linspace(0, (511/SR), 512);
+% Time = NaN(size(Samples_flat));
+% for i = 1:512
+%     Time(i:512:end) = timestamps + Timestamps_buffer(i);
+% end
+% 
+% % Find dropped frames
+% dropped_frames = find(NumberOfValidSamples < 512);
+% dropped_samples = [];
+% if ~isempty(dropped_frames)
+%     for i = 1:length(dropped_frames)
+%         frame_idx = dropped_frames(i);
+%         invalid_samples = (NumberOfValidSamples(frame_idx)+1):512;
+%         global_indices = (frame_idx-1)*512 + invalid_samples;
+%         dropped_samples = [dropped_samples global_indices];
+%     end
+%     error_times = Time(dropped_samples);
+% else
+%     error_times = [];
+% end
+% 
+% save('extracted_dropped_samples.mat', 'dropped_samples', 'error_times', 'Time', '-v7.3');
+% fprintf('  Dropped samples: %d (%.2f%%)\n\n', length(dropped_samples), ...
+%     100*length(dropped_samples)/length(Time));
+
+% %% STEP 2: Calculate PSD for all channels
+% fprintf('Step 2: Calculating PSD for all channels...\n');
+% 
+% % Get available channels
+% ncs_files = dir('*_RateReduced.ncs');
+% available_channels = [];
+% for i = 1:length(ncs_files)
+%     name_parts = strsplit(ncs_files(i).name, {'CSC', '_'});
+%     if length(name_parts) >= 2
+%         ch_num = str2double(name_parts{2});
+%         if ~isnan(ch_num)
+%             available_channels = [available_channels ch_num];
+%         end
+%     end
+% end
+% available_channels = unique(available_channels);
+% 
+% fprintf('  Found %d channels\n', length(available_channels));
+% 
+% % PSD parameters
+% target_SR = 1000;
+% nfft = 1024;
+% win = hanning(nfft);
+% noverlap = [];
+% 
+% all_PSD = struct([]);
+% 
+% for q = 1:length(available_channels)
+%     ch = available_channels(q);
+%     filename = sprintf('CSC%d_RateReduced.ncs', ch);
+% 
+%     fprintf('  [%d/%d] CSC%d...', q, length(available_channels), ch);
+% 
+%     try
+%         [Timestamps, ~, ~, ~, Samples, Header] = ...
+%             Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+% 
+%         SR_line = Header{contains(Header, 'SamplingFrequency')};
+%         original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+% 
+%         Samples_flat = Samples(:);
+%         downsampling_factor = round(original_SR / target_SR);
+%         CSC_resampled = resample(Samples_flat, 1, downsampling_factor);
+% 
+%         % Calculate PSD
+%         [Pxx, F] = pwelch(CSC_resampled, win, noverlap, nfft, target_SR);
+% 
+%         all_PSD(q).CSCchannel = ch;
+%         all_PSD(q).filename = filename;
+%         all_PSD(q).SR = target_SR;
+%         all_PSD(q).PSD = 10*log10(Pxx');
+%         all_PSD(q).PSD_F = F;
+% 
+%         fprintf(' Done\n');
+%     catch ME
+%         fprintf(' ERROR: %s\n', ME.message);
+%     end
+% end
+% 
+% save(fullfile(output_path, 'PSD_data.mat'), 'all_PSD');
+% fprintf('  Saved PSD_data.mat\n\n');
+
+% %% STEP 3: Determine best channels
+% fprintf('Step 3: Determining best theta and ripple channels...\n');
+% 
+% theta_filter = [6 12];
+% ripple_filter = [125 300];
+% 
+% theta_idx = find(all_PSD(1).PSD_F >= theta_filter(1) & all_PSD(1).PSD_F <= theta_filter(2));
+% ripple_idx = find(all_PSD(1).PSD_F >= ripple_filter(1) & all_PSD(1).PSD_F <= ripple_filter(2));
+% 
+% for i = 1:length(all_PSD)
+%     % Theta power (relative to baseline)
+%     theta_psd = all_PSD(i).PSD(theta_idx);
+%     theta_baseline = 0.5 * (theta_psd(1) + theta_psd(end));
+%     theta_power(i) = median(theta_psd) - theta_baseline;
+% 
+%     % Ripple power (relative to baseline)
+%     ripple_psd = all_PSD(i).PSD(ripple_idx);
+%     ripple_baseline = 0.5 * (ripple_psd(1) + ripple_psd(end));
+%     ripple_power(i) = median(ripple_psd) - ripple_baseline;
+% end
+% 
+% [max_theta, idx_theta] = max(theta_power);
+% [max_ripple, idx_ripple] = max(ripple_power);
+% 
+% best_theta_channel = all_PSD(idx_theta).CSCchannel;
+% best_ripple_channel = all_PSD(idx_ripple).CSCchannel;
+% 
+% fprintf('  Best theta channel:  CSC%d (power = %.2f dB)\n', best_theta_channel, max_theta);
+% fprintf('  Best ripple channel: CSC%d (power = %.2f dB)\n\n', best_ripple_channel, max_ripple);
+% 
+% % Save
+% best_channels.bestCSC_theta = best_theta_channel;
+% best_channels.bestCSC_ripple = best_ripple_channel;
+% best_channels.theta_power = theta_power;
+% best_channels.ripple_power = ripple_power;
+% save(fullfile(output_path, 'best_CSC.mat'), 'best_channels');
+% 
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Once Step 3 (Best Channel) found, quicker plotting runs just run from here ! 
+
+%% STEP 3: Define best channels (SKIPPING PSD)
+fprintf('Step 3: Using predefined best channels...\n');
+
+% --- Manually set channels here ---
+best_theta_channel = 22; % Manually set from previous run
+best_ripple_channel = 7;   % Manually set from previous run
+% ----------------------------------------
+
+fprintf('  Best theta channel:  CSC%d (predefined)\n', best_theta_channel);
+fprintf('  Best ripple channel: CSC%d (predefined)\n\n', best_ripple_channel);
+
+% filter definitions
+theta_filter = [6 12];
+ripple_filter = [125 300];
+
+%% STEP 4: Extract and validate with best channels
+fprintf('Step 4: Extracting data from best channels...\n');
+% LOAD TABLE 
+load(fullfile(table_path, 'Final_Table_for_GLM.mat'));
+session_data = Final_GLM_Table(strcmp(Final_GLM_Table.SessionName, session_name), :);
+fprintf('  Table: %d rows, time range %.1f to %.1f min\n', ...
+    height(session_data), min(session_data.time_min), max(session_data.time_min));
+channels = [best_theta_channel, best_ripple_channel];
+channel_labels = {'theta', 'ripple'};
+target_SR = 1000;
+epsv = realmin('double'); % Small value to prevent log(0)
+
+for jj = 1:length(channels)
+    ch = channels(jj);
+    label = channel_labels{jj};
+    
+    filename = fullfile(data_path, sprintf('CSC%d_RateReduced.ncs', ch));
+    fprintf('  Processing %s (CSC%d)...\n', label, ch);
+    
+    % Read data
+    [Timestamps, ~, ~, ~, Samples, Header] = ...
+        Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+    
+    SR_line = Header{contains(Header, 'SamplingFrequency')};
+    original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+    
+    Samples_flat = Samples(:);
+    timestamps_sec = double(Timestamps) * 1e-6;
+    
+    % Interpolate timestamps
+    Timestamps_buffer = linspace(0, (511/original_SR), 512);
+    Time = NaN(size(Samples_flat));
+    for i = 1:512
+        Time(i:512:end) = timestamps_sec + Timestamps_buffer(i);
+    end
+    
+    % % Remove dropped samples (there were none so commented out!)
+    % if ~isempty(dropped_samples)
+    %     fprintf('    Removing %d dropped samples...\n', length(dropped_samples));
+    %     Time(dropped_samples) = [];
+    %     Samples_flat(dropped_samples) = [];
+    % end
+    
+    % Interpolate to regular grid
+    CSCtime = (min(Time):(1/original_SR):max(Time))';
+    signal_interp = interp1(Time, Samples_flat, CSCtime, 'linear');
+    
+    % Downsample (using precise p/q method)
+    CSCraw_full = resample(signal_interp, target_SR, original_SR);
+    CSCtime_downsampled = linspace(CSCtime(1), CSCtime(end), numel(CSCraw_full))';
+    
+    % Align to injection time for FULL signal
+    time_min_aligned_full = (CSCtime_downsampled - injection_time_sec) / 60;
+    
+    fprintf('    Full signal: %.1f to %.1f min (%.1f min duration)\n', ...
+        min(time_min_aligned_full), max(time_min_aligned_full), ...
+        length(CSCraw_full)/target_SR/60);
+    
+    % Apply filtering to full signal
+    if strcmp(label, 'theta')
+        % --- THETA PIPELINE (PSD/SPECTROGRAM) ---
+        fprintf('    Calculating theta (6-12 Hz) spectrogram...\n');
+        theta_filter = [6 12];
+        
+        % Spectrogram parameters (matching your extract_PSD)
+        nfft = 1024;
+        win = hanning(nfft);
+        noverlap = nfft / 2; % 50% overlap
+        
+        [~, F, T_spec, P_spec] = spectrogram(CSCraw_full, win, noverlap, nfft, target_SR, 'psd');
+        
+        % T_spec is time in seconds from start of CSCraw_full
+        % Align spectrogram time to injection time
+        t_start_sec = CSCtime_downsampled(1);
+        T_spec_aligned_sec = T_spec + t_start_sec;
+        T_spec_aligned_min = (T_spec_aligned_sec - injection_time_sec) / 60;
+        
+        % Get theta band power time series (mean power in band)
+        theta_idx = F >= theta_filter(1) & F <= theta_filter(2);
+        theta_power_linear_timeseries = mean(P_spec(theta_idx, :), 1);
+        
+       % Convert to ABSOLUTE dB (to match the table)
+fprintf('    Converting to absolute dB (10*log10(Power))...\n');
+theta_power_db_timeseries = 10 * log10(max(theta_power_linear_timeseries, epsv));
+        
+        % Save the time-resolved spectrogram power
+        % STEP 5 will bin this using 'max'
+        CSC(jj).theta_envelope = theta_power_db_timeseries; % Re-using field name
+        CSC(jj).CSCtime_min = T_spec_aligned_min;
+        
+        fprintf('    Spectrogram time series: %.1f min duration\n', ...
+            range(T_spec_aligned_min));
+        
+    elseif strcmp(label, 'ripple')
+        % --- RIPPLE PIPELINE (HILBERT) ---
+        fprintf('    Filtering ripple (125-300 Hz) on FULL signal...\n');
+        filter_order = round(6*target_SR/(ripple_filter(2)-ripple_filter(1)));
+        norm_freq = ripple_filter / (target_SR/2);
+        b_ripple = fir1(filter_order, norm_freq, 'bandpass');
+        
+        ripple_full = filtfilt(b_ripple, 1, CSCraw_full);
+        
+        % Get envelope (WITH 15-pt smoothing)
+        ripple_envelope_full = smooth(abs(hilbert(ripple_full)), 15)';
+        
+        % Convert to POWER (Amplitude^2)
+        ripple_power_full_linear = ripple_envelope_full.^2;
+        
+        % Calculate baseline from pre-injection POWER
+        pre_injection_mask_full = time_min_aligned_full < 0;
+        baseline_ripple = mean(ripple_power_full_linear(pre_injection_mask_full), 'omitnan');
+        
+        % Convert to dB using pre-injection baseline
+        fprintf('    Converting to dB relative to PRE-INJECTION mean...\n');
+        ripple_power_full_db = 10 * log10(max(ripple_power_full_linear, epsv) / baseline_ripple);
+        
+        % Save the time-resolved Hilbert power
+        % STEP 5 will bin this using 'mean'
+        CSC(jj).ripple_envelope = ripple_power_full_db; % Re-using field name
+        CSC(jj).CSCtime_min = time_min_aligned_full;
+        
+        fprintf('    Cropped to table period: %.1f min duration\n', ...
+            range(time_min_aligned_full));
+    end
+    
+    CSC(jj).channel = ch;
+    CSC(jj).SR = target_SR;
+    CSC(jj).channel_label = label;
+end
+save(fullfile(output_path, 'extracted_CSC_table_period.mat'), 'CSC', '-v7.3');
+fprintf('  Saved extracted_CSC_table_period.mat\n\n');
+
+
+
+%% STEP 5: Bin using table's metrics
+fprintf('Step 5: Binning with table metrics (theta=max, ripple=mean)...\n');
+
+n_timepoints = height(session_data);
+theta_power_max_binned = nan(n_timepoints, 1);
+ripple_power_mean_binned = nan(n_timepoints, 1);
+
+for i = 1:n_timepoints
+    target_time = session_data.time_min(i);
+    
+    % Theta - MAX per minute
+    theta_mask = CSC(1).CSCtime_min >= (target_time - 0.5) & ...
+                 CSC(1).CSCtime_min < (target_time + 0.5);
+    if sum(theta_mask) > 0
+        theta_power_max_binned(i) = max(CSC(1).theta_envelope(theta_mask));
+    end
+    
+    % Ripple - MEAN per minute
+    ripple_mask = CSC(2).CSCtime_min >= (target_time - 0.5) & ...
+                  CSC(2).CSCtime_min < (target_time + 0.5);
+    if sum(ripple_mask) > 0
+        ripple_power_mean_binned(i) = mean(CSC(2).ripple_envelope(ripple_mask));
+    end
+end
+
+% Z-score (this should now match table's distribution)
+theta_power_z_binned = zscore(theta_power_max_binned);
+ripple_power_z_binned = zscore(ripple_power_mean_binned);
+
+bin_centers = session_data.time_min;
+
+%% STEP 5.5: Quantitative Validation (Correlation)
+fprintf('\nStep 5.5: Calculating correlation...\n');
+
+% Ensure no NaNs are present for correlation
+valid_idx = ~isnan(theta_power_max_binned) & ~isnan(session_data.theta_power_max) & ...
+            ~isnan(ripple_power_mean_binned) & ~isnan(session_data.ripple_power_mean);
+
+if sum(valid_idx) < 2
+    fprintf('  Not enough valid data points to correlate.\n');
+else
+    % Theta Correlation
+    [r_theta, p_theta] = corr(theta_power_max_binned(valid_idx), ...
+                              session_data.theta_power_max(valid_idx));
+    fprintf('  Theta (Raw vs Table RAW) Correlation: r = %.6f, p = %.2e\n', r_theta, p_theta);
+    
+    % Ripple Correlation
+    [r_ripple, p_ripple] = corr(ripple_power_mean_binned(valid_idx), ...
+                                session_data.ripple_power_mean(valid_idx));
+    fprintf('  Ripple (Raw vs Table RAW) Correlation: r = %.6f, p = %.2e\n', r_ripple, p_ripple);
+end
+
+
+%% CORRECTED EXTRACTION - MATCH LAB EXACTLY
+fprintf('\n========================================\n');
+fprintf('MATCHING LAB METHOD EXACTLY\n');
+fprintf('========================================\n\n');
+
+% Go back to Step 4 in your pipeline
+% You already have: ripple_full = filtfilt(b_ripple, 1, CSCraw_full);
+
+% DO NOT convert to dB! Use linear envelope like the lab
+fprintf('Extracting ripple with LAB METHOD:\n');
+
+% 1. Hilbert envelope
+ripple_envelope_linear = abs(hilbert(ripple_full));
+
+% 2. Smooth with 15 points
+ripple_envelope_smoothed = smooth(ripple_envelope_linear, 15)';
+
+% 3. Z-score the WHOLE session
+ripple_zscore_lab_method = zscore(ripple_envelope_smoothed);
+
+fprintf('  Mean: %.6f (should be 0)\n', mean(ripple_zscore_lab_method));
+fprintf('  Std: %.6f (should be 1)\n', std(ripple_zscore_lab_method));
+fprintf('  Range: [%.2f, %.2f]\n\n', min(ripple_zscore_lab_method), max(ripple_zscore_lab_method));
+
+% Now bin this z-scored signal
+n_timepoints = height(session_data);
+ripple_binned_lab_method = nan(n_timepoints, 1);
+
+for i = 1:n_timepoints
+    target_time = session_data.time_min(i);
+    mask = time_min_aligned_full >= (target_time - 0.5) & ...
+           time_min_aligned_full < (target_time + 0.5);
+    
+    if sum(mask) > 0
+        ripple_binned_lab_method(i) = mean(ripple_zscore_lab_method(mask));
+    end
+end
+
+fprintf('After binning:\n');
+fprintf('  Mean: %.6f\n', mean(ripple_binned_lab_method, 'omitnan'));
+fprintf('  Std: %.6f\n', std(ripple_binned_lab_method, 'omitnan'));
+fprintf('  Range: [%.4f, %.4f]\n\n', ...
+    min(ripple_binned_lab_method), max(ripple_binned_lab_method));
+
+% Compare to lab final
+valid_idx = ~isnan(ripple_binned_lab_method) & ~isnan(lab_ripple_final);
+[r_final, ~] = corr(ripple_binned_lab_method(valid_idx), lab_ripple_final(valid_idx));
+
+fprintf('CORRELATION WITH LAB FINAL:\n');
+fprintf('  r = %.6f\n\n', r_final);
+
+% Plot
+figure('Position', [100, 100, 1400, 600]);
+
+subplot(2,1,1);
+plot(session_data.time_min, ripple_binned_lab_method, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(session_data.time_min, lab_ripple_final, 'r--', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Power (z-score)');
+title(sprintf('LAB METHOD: Your Extraction vs Lab (r = %.4f)', r_final));
+legend({'Your extraction (lab method)', 'Lab final'}, 'Location', 'best');
+grid on;
+
+subplot(2,1,2);
+plot(session_data.time_min, ripple_binned_lab_method, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(session_data.time_min, lab_ripple_final, 'r.', 'MarkerSize', 8);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (z-score)');
+title('Overlay');
+grid on;
+
+fprintf('========================================\n');
+if r_final > 0.95
+    fprintf('✓✓✓ SUCCESS! METHOD VALIDATED! ✓✓✓\n');
+    fprintf('Your extraction matches lab perfectly!\n');
+elseif r_final > 0.85
+    fprintf('✓✓ Very close! Minor differences remain.\n');
+else
+    fprintf('Still investigating...\n');
+end
+fprintf('========================================\n');
+
+%% STEP 6: Statistics and visualization
+fprintf('\n========================================\n');
+fprintf('VALIDATION RESULTS\n');
+fprintf('========================================\n\n');
+
+% Plot
+figure('Position', [100, 100, 1400, 600]);
+subplot(2,1,1);
+% PLOT RAW BINNED DATA
+plot(bin_centers, theta_power_max_binned, 'b-', 'LineWidth', 1.5);
+hold on;
+% PLOT RAW TABLE DATA
+plot(session_data.time_min, session_data.theta_power_max, 'r.', 'MarkerSize', 6);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Theta Power (Raw Envelope)'); % CHANGED LABEL
+title(sprintf('Theta (CSC%d): Raw vs Table (RAW VALUES)', best_theta_channel));
+legend({'Raw extraction', 'Table'}, 'Location', 'best');
+grid on;
+
+subplot(2,1,2);
+% PLOT RAW BINNED DATA
+plot(bin_centers, ripple_power_mean_binned, 'b-', 'LineWidth', 1.5);
+hold on;
+% PLOT RAW TABLE DATA
+plot(session_data.time_min, session_data.ripple_power_mean, 'r.', 'MarkerSize', 6);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (Raw Envelope)'); % CHANGED LABEL
+title(sprintf('Ripple (CSC%d): Raw vs Table (RAW VALUES)', best_ripple_channel));
+legend({'Raw extraction', 'Table'}, 'Location', 'best');
+grid on;
+
+saveas(gcf, fullfile(output_path, sprintf('validation_RAW_%s.png', session_name)));
+fprintf('Figure saved!\n\n');
+
+fprintf('========================================\n');
+fprintf('COMPLETE!\n');
+fprintf('========================================\n');
+
+cd(original_dir);
+
+
+%%%%%
+%%
+%% Plot your raw extraction vs lab's raw extraction
+fprintf('\n========================================\n');
+fprintf('PLOTTING RAW SIGNALS (before binning)\n');
+fprintf('========================================\n\n');
+
+% Load lab's raw extraction
+psd_path = 'D:\B6_Probe\mouseB6_PBS_Day1_Sleep_11_21_2012';
+load(fullfile(psd_path, 'extracted_CSC.mat'), 'out');
+csc7_idx = find([out.channel] == 7);
+
+lab_raw_zscore = out(csc7_idx).ripple_zscore;
+lab_time_sec = out(csc7_idx).CSCtime;
+lab_time_min = (lab_time_sec - injection_time_sec) / 60;
+
+% Your raw extraction (z-scored, before binning)
+your_raw_zscore = ripple_zscore_lab_method; % from previous step
+your_time_min = time_min_aligned_full;
+
+fprintf('LAB RAW:\n');
+fprintf('  Length: %d samples\n', length(lab_raw_zscore));
+fprintf('  Mean: %.6f, Std: %.6f\n', mean(lab_raw_zscore), std(lab_raw_zscore));
+fprintf('  Range: [%.2f, %.2f]\n\n', min(lab_raw_zscore), max(lab_raw_zscore));
+
+fprintf('YOUR RAW:\n');
+fprintf('  Length: %d samples\n', length(your_raw_zscore));
+fprintf('  Mean: %.6f, Std: %.6f\n', mean(your_raw_zscore), std(your_raw_zscore));
+fprintf('  Range: [%.2f, %.2f]\n\n', min(your_raw_zscore), max(your_raw_zscore));
+
+% Compute correlation on raw signals
+sample_times = -60:0.5:300; % Sample every 30 seconds
+lab_samples = nan(length(sample_times), 1);
+your_samples = nan(length(sample_times), 1);
+
+for i = 1:length(sample_times)
+    t = sample_times(i);
+    [~, lab_idx] = min(abs(lab_time_min - t));
+    [~, your_idx] = min(abs(your_time_min - t));
+    lab_samples(i) = lab_raw_zscore(lab_idx);
+    your_samples(i) = your_raw_zscore(your_idx);
+end
+
+valid = ~isnan(lab_samples) & ~isnan(your_samples);
+[r_raw, ~] = corr(lab_samples(valid), your_samples(valid));
+
+fprintf('Raw signal correlation (sampled): r = %.6f\n\n', r_raw);
+
+% Plot full signals
+figure('Position', [100, 100, 1400, 900]);
+
+% Top: Lab raw
+subplot(3,1,1);
+plot(lab_time_min, lab_raw_zscore, 'r-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Z-score');
+title(sprintf('LAB RAW (mean=%.2f, std=%.2f)', mean(lab_raw_zscore), std(lab_raw_zscore)));
+xlim([-70 310]);
+ylim([-5 20]);
+grid on;
+
+% Middle: Your raw
+subplot(3,1,2);
+plot(your_time_min, your_raw_zscore, 'b-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Z-score');
+title(sprintf('YOUR RAW (mean=%.2f, std=%.2f)', mean(your_raw_zscore), std(your_raw_zscore)));
+xlim([-70 310]);
+ylim([-5 20]);
+grid on;
+
+% Bottom: Overlay
+subplot(3,1,3);
+plot(lab_time_min, lab_raw_zscore, 'r-', 'LineWidth', 0.5, 'DisplayName', 'Lab raw');
+hold on;
+plot(your_time_min, your_raw_zscore, 'b-', 'LineWidth', 0.5, 'DisplayName', 'Your raw');
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Z-score');
+title(sprintf('OVERLAY (r = %.4f)', r_raw));
+legend('Location', 'best');
+xlim([-70 310]);
+ylim([-5 20]);
+grid on;
+
+% Zoom in on a specific region for detail
+figure('Position', [100, 100, 1400, 500]);
+time_window = [50, 100]; % 50-100 min post-injection
+
+subplot(1,2,1);
+mask_lab = lab_time_min >= time_window(1) & lab_time_min <= time_window(2);
+mask_your = your_time_min >= time_window(1) & your_time_min <= time_window(2);
+plot(lab_time_min(mask_lab), lab_raw_zscore(mask_lab), 'r-', 'LineWidth', 1);
+hold on;
+plot(your_time_min(mask_your), your_raw_zscore(mask_your), 'b-', 'LineWidth', 1);
+xlabel('Time (min)');
+ylabel('Z-score');
+title(sprintf('ZOOMED: %d-%d min', time_window(1), time_window(2)));
+legend({'Lab raw', 'Your raw'}, 'Location', 'best');
+grid on;
+
+% Scatter plot
+subplot(1,2,2);
+scatter(lab_samples, your_samples, 10, 'filled');
+xlabel('Lab raw z-score');
+ylabel('Your raw z-score');
+title(sprintf('Scatter (r = %.4f)', r_raw));
+grid on;
+axis equal;
+hold on;
+plot([-5 20], [-5 20], 'k--', 'LineWidth', 1.5); % identity line
+
+fprintf('========================================\n');
+
+%% plot un-binned Z-scored ripple power comparing to table 
+%% --- PLOT 5-MINUTE EXCERPT OF RAW Z-SCORED RIPPLE POWER ---
+
+fprintf('\n========================================\n');
+fprintf('PLOTTING 5-MINUTE RAW EXCERPT\n');
+fprintf('========================================\n\n');
+
+% --- User-defined: Set the time window to plot ---
+start_minute = 50; % Start time in minutes (relative to injection)
+duration_minutes = 5; % How long the excerpt should be
+end_minute = start_minute + duration_minutes;
+% ----------------------------------------------------
+
+% We already have these variables from the previous script steps:
+% - your_ripple_zscore (Your extracted raw z-scored signal)
+% - time_min_aligned_full (The time vector for your signal)
+% - lab_raw_zscore (The lab's raw z-scored signal)
+% - lab_time_min (The time vector for the lab's signal)
+
+% Find the indices for your data within the 5-minute window
+your_mask = time_min_aligned_full >= start_minute & time_min_aligned_full < end_minute;
+your_time_excerpt = time_min_aligned_full(your_mask);
+your_data_excerpt = ripple_zscore_lab_method(your_mask); % Using the correctly calculated z-score
+
+% Find the indices for the lab's data within the 5-minute window
+lab_mask = lab_time_min >= start_minute & lab_time_min < end_minute;
+lab_time_excerpt = lab_time_min(lab_mask);
+lab_data_excerpt = lab_raw_zscore(lab_mask);
+
+fprintf('Plotting from t=%.1f to t=%.1f minutes...\n', start_minute, end_minute);
+
+% Create the plot
+figure('Position', [100, 100, 1400, 600]);
+hold on;
+
+plot(lab_time_excerpt, lab_data_excerpt, 'r-', 'LineWidth', 1.5, 'DisplayName', 'Lab Raw');
+plot(your_time_excerpt, your_data_excerpt, 'b--', 'LineWidth', 1.5, 'DisplayName', 'Your Raw');
+
+title(sprintf('Zoomed View: Raw Ripple Power (Z-score) from t=%d to %d min', start_minute, end_minute));
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (Z-score)');
+legend('Location', 'northeast');
+grid on;
+xlim([start_minute, end_minute]);
+
+fprintf('Plot generated!\n');
+
+
+%% Plot RAW ripple power (before z-scoring)
+%% Plot RAW ripple power (before z-scoring) with consistent y-axis
+fprintf('\n========================================\n');
+fprintf('PLOTTING RAW RIPPLE ENVELOPE (before z-score)\n');
+fprintf('========================================\n\n');
+
+% Your raw envelope (linear, before z-scoring)
+your_raw_envelope = ripple_envelope_smoothed; % from earlier: smooth(abs(hilbert(...)), 15)
+your_time_min = time_min_aligned_full;
+
+fprintf('YOUR RAW ENVELOPE (before z-score):\n');
+fprintf('  Length: %d samples (%.2f min)\n', length(your_raw_envelope), length(your_raw_envelope)/1000/60);
+fprintf('  Mean: %.4f\n', mean(your_raw_envelope));
+fprintf('  Std: %.4f\n', std(your_raw_envelope));
+fprintf('  Range: [%.4f, %.4f]\n\n', min(your_raw_envelope), max(your_raw_envelope));
+
+% Determine global y-axis limits
+y_min = min(your_raw_envelope);
+y_max = max(your_raw_envelope);
+
+% Plot full session
+figure('Position', [100, 100, 1400, 800]);
+
+% Top: Full session overview
+subplot(3,1,1);
+plot(your_time_min, your_raw_envelope, 'b-', 'LineWidth', 0.3);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('RAW RIPPLE ENVELOPE - Full Session (mean=%.2f, std=%.2f)', ...
+    mean(your_raw_envelope), std(your_raw_envelope)));
+xlim([-70 310]);
+ylim([y_min y_max]);
+grid on;
+
+% Middle: Zoom on pre-injection
+subplot(3,1,2);
+pre_mask = your_time_min >= -60 & your_time_min <= 0;
+plot(your_time_min(pre_mask), your_raw_envelope(pre_mask), 'b-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('PRE-INJECTION (-60 to 0 min) - mean=%.2f', mean(your_raw_envelope(pre_mask))));
+xlim([-60 0]);
+ylim([y_min y_max]);
+grid on;
+
+% Bottom: Zoom on post-injection
+subplot(3,1,3);
+post_mask = your_time_min >= 0 & your_time_min <= 120;
+plot(your_time_min(post_mask), your_raw_envelope(post_mask), 'b-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('POST-INJECTION (0 to 120 min) - mean=%.2f', mean(your_raw_envelope(post_mask))));
+xlim([0 120]);
+ylim([y_min y_max]);
+grid on;
+
+% Detailed zoomed windows with consistent y-axis
+figure('Position', [100, 100, 1400, 800]);
+
+time_windows = [[-60, -50]; [-10, 0]; [0, 10]; [50, 60]; [100, 110]; [200, 210]];
+
+for w = 1:6
+    subplot(3,2,w);
+    t_start = time_windows(w,1);
+    t_end = time_windows(w,2);
+    
+    mask = your_time_min >= t_start & your_time_min <= t_end;
+    
+    plot(your_time_min(mask), your_raw_envelope(mask), 'b-', 'LineWidth', 0.8);
+    
+    if t_start <= 0 && t_end >= 0
+        hold on;
+        xline(0, 'k--', 'Injection', 'LineWidth', 2);
+    end
+    
+    xlabel('Time (min)');
+    ylabel('Ripple Envelope (μV)');
+    title(sprintf('%d to %d min (mean=%.2f)', t_start, t_end, mean(your_raw_envelope(mask))));
+    ylim([y_min y_max]);  % Consistent y-axis
+    grid on;
+end
+
+sgtitle('RAW RIPPLE ENVELOPE - Detailed Windows (Before Z-scoring)');
+
+% Histogram of raw values
+figure('Position', [100, 100, 1200, 500]);
+
+subplot(1,2,1);
+histogram(your_raw_envelope, 100, 'FaceColor', 'b', 'EdgeColor', 'none', 'FaceAlpha', 0.7);
+xlabel('Ripple Envelope (μV)');
+ylabel('Count');
+title('Distribution of Raw Ripple Envelope');
+grid on;
+
+subplot(1,2,2);
+pre_mask = your_time_min < 0;
+post_mask = your_time_min >= 0;
+
+histogram(your_raw_envelope(pre_mask), 50, 'FaceColor', 'r', 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+hold on;
+histogram(your_raw_envelope(post_mask), 50, 'FaceColor', 'b', 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+xlabel('Ripple Envelope (μV)');
+ylabel('Count');
+title('Pre vs Post Injection Distribution');
+legend({'Pre-injection', 'Post-injection'}, 'Location', 'best');
+grid on;
+
+fprintf('========================================\n');
+fprintf('STATISTICS:\n');
+fprintf('  Pre-injection:  mean=%.4f, std=%.4f\n', ...
+    mean(your_raw_envelope(pre_mask)), std(your_raw_envelope(pre_mask)));
+fprintf('  Post-injection: mean=%.4f, std=%.4f\n', ...
+    mean(your_raw_envelope(post_mask)), std(your_raw_envelope(post_mask)));
+fprintf('  Full session:   mean=%.4f, std=%.4f\n', ...
+    mean(your_raw_envelope), std(your_raw_envelope));
+fprintf('  Y-axis range: [%.4f, %.4f]\n', y_min, y_max);
+fprintf('========================================\n');
+
+
+%% raw raw raw 
+%% Plot 1: Raw unfiltered CSC data (before anything)
+fprintf('\n========================================\n');
+fprintf('PLOTTING RAW UNFILTERED LFP\n');
+fprintf('========================================\n\n');
+
+% You should have CSCraw_full from your extraction
+% If not, load it:
+data_path = 'D:\B6_Probe\mouseB6_CNO_Day2_Sleep_11_26_2012\raw';
+cd(data_path);
+
+filename = 'CSC7_RateReduced.ncs';
+fprintf('Loading raw CSC7 data...\n');
+
+[Timestamps, ~, ~, ~, Samples, Header] = ...
+    Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+
+SR_line = Header{contains(Header, 'SamplingFrequency')};
+original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+
+Samples_flat = Samples(:);
+timestamps_sec = double(Timestamps) * 1e-6;
+
+% Get units from header
+unit_line = Header{contains(Header, 'InputRange') | contains(Header, 'ADBitVolts')};
+fprintf('Header info: %s\n', unit_line);
+
+fprintf('  Original SR: %d Hz\n', original_SR);
+fprintf('  Total samples: %d\n', length(Samples_flat));
+fprintf('  Duration: %.2f hours\n', length(Samples_flat)/original_SR/3600);
+fprintf('  Amplitude range: [%.2f, %.2f] μV\n\n', min(Samples_flat), max(Samples_flat));
+
+% Plot raw LFP at different time windows
+figure('Position', [100, 100, 1400, 900]);
+
+% Convert to time relative to injection
+injection_time_sec = 179678.6186;
+Timestamps_buffer = linspace(0, (511/original_SR), 512);
+Time_full = NaN(size(Samples_flat));
+for i = 1:512
+    Time_full(i:512:end) = timestamps_sec + Timestamps_buffer(i);
+end
+time_min_full = (Time_full - injection_time_sec) / 60;
+
+% Select different time windows to show
+time_windows = [
+    -60, -59.95;   % Pre-injection (50 ms)
+    -0.05, 0;      % Just before injection (50 ms)
+    0, 0.05;       % Just after injection (50 ms)
+    100, 100.05;   % Post-injection (50 ms)
+];
+
+for w = 1:4
+    subplot(4,1,w);
+    t_start = time_windows(w,1);
+    t_end = time_windows(w,2);
+    
+    mask = time_min_full >= t_start & time_min_full <= t_end;
+    
+    plot(time_min_full(mask)*60, Samples_flat(mask), 'k-', 'LineWidth', 0.5);
+    xlabel('Time relative to injection (seconds)');
+    ylabel('Amplitude (μV)');
+    title(sprintf('RAW UNFILTERED LFP: %.2f to %.2f min', t_start, t_end));
+    grid on;
+end
+
+sgtitle('Raw Unfiltered CSC7 Data (Before Any Processing)');
+
+%% Plot 2: Ripple envelope (before z-scoring) - binned
+fprintf('\n========================================\n');
+fprintf('PLOTTING RIPPLE ENVELOPE (before z-score)\n');
+fprintf('========================================\n\n');
+
+% Your ripple envelope before z-scoring (linear amplitude)
+% This is: smooth(abs(hilbert(filtered)), 15)
+ripple_envelope_linear = ripple_envelope_smoothed; % From earlier
+time_min_envelope = time_min_aligned_full;
+
+fprintf('RIPPLE ENVELOPE (linear amplitude):\n');
+fprintf('  Mean: %.4f μV\n', mean(ripple_envelope_linear));
+fprintf('  Std: %.4f μV\n', std(ripple_envelope_linear));
+fprintf('  Range: [%.4f, %.4f] μV\n\n', min(ripple_envelope_linear), max(ripple_envelope_linear));
+
+% Bin per minute (before z-scoring)
+n_timepoints = height(session_data);
+ripple_envelope_binned = nan(n_timepoints, 1);
+
+for i = 1:n_timepoints
+    target_time = session_data.time_min(i);
+    mask = time_min_envelope >= (target_time - 0.5) & ...
+           time_min_envelope < (target_time + 0.5);
+    
+    if sum(mask) > 0
+        ripple_envelope_binned(i) = mean(ripple_envelope_linear(mask));
+    end
+end
+
+fprintf('BINNED RIPPLE ENVELOPE (1-min bins, BEFORE z-score):\n');
+fprintf('  Mean: %.4f μV\n', mean(ripple_envelope_binned, 'omitnan'));
+fprintf('  Std: %.4f μV\n', std(ripple_envelope_binned, 'omitnan'));
+fprintf('  Range: [%.4f, %.4f] μV\n\n', ...
+    min(ripple_envelope_binned), max(ripple_envelope_binned));
+
+% Plot binned envelope
+figure('Position', [100, 100, 1400, 800]);
+
+% Top: Full session
+subplot(3,1,1);
+plot(session_data.time_min, ripple_envelope_binned, 'b-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('BINNED RIPPLE ENVELOPE (1-min bins, BEFORE z-scoring) - mean=%.2f μV', ...
+    mean(ripple_envelope_binned, 'omitnan')));
+xlim([-70 310]);
+grid on;
+
+% Middle: Pre-injection
+subplot(3,1,2);
+pre_mask = session_data.time_min < 0;
+plot(session_data.time_min(pre_mask), ripple_envelope_binned(pre_mask), 'r-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('PRE-INJECTION - mean=%.2f μV', mean(ripple_envelope_binned(pre_mask), 'omitnan')));
+xlim([-70 0]);
+grid on;
+
+% Bottom: Post-injection
+subplot(3,1,3);
+post_mask = session_data.time_min >= 0;
+plot(session_data.time_min(post_mask), ripple_envelope_binned(post_mask), 'b-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('POST-INJECTION - mean=%.2f μV', mean(ripple_envelope_binned(post_mask), 'omitnan')));
+xlim([0 310]);
+grid on;
+
+sgtitle('Ripple Envelope (Linear Amplitude) - 1-Minute Bins, BEFORE Z-scoring');
+
+% Comparison plot: Before vs After z-scoring
+figure('Position', [100, 100, 1400, 600]);
+
+% Top: Before z-scoring (μV)
+subplot(2,1,1);
+plot(session_data.time_min, ripple_envelope_binned, 'b-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title('BEFORE Z-scoring: Linear Amplitude');
+xlim([-70 310]);
+grid on;
+
+% Bottom: After z-scoring (dimensionless)
+subplot(2,1,2);
+plot(session_data.time_min, ripple_binned_lab_method, 'r-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (z-score)');
+title('AFTER Z-scoring: Dimensionless (mean=0, std=1)');
+xlim([-70 310]);
+grid on;
+
+sgtitle('Comparison: Before vs After Z-scoring');
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% RIPPLE & THETA VALIDATION PIPELINE - CNO SESSION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% CNO Session: mouseB6_CNO_Day2_Sleep_11_26_2012
+% Vehicle Session: mouseB6_PBS_Day1_Sleep_11_21_2012
+% Validates extraction against lab's methods
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clear; clc;
+
+%% ===================================================================
+%% 1. SETUP - Paths and Parameters
+%% ===================================================================
+
+fprintf('\n========================================\n');
+fprintf('SETUP\n');
+fprintf('========================================\n\n');
+
+% Paths - Make sure to set the correct path for the CNO and Vehicle
+% Sessions!!!
+
+% % CNO Path: 
+% data_path = 'D:\B6_Probe\mouseB6_CNO_Day2_Sleep_11_26_2012\raw';
+% Vehicle path:
+data_path = 'D:\B6_Probe\mouseB6_PBS_Day1_Sleep_11_21_2012\raw';
+output_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawNeuralAnalysis\CNO_Day2';
+neuralynx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only';
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+
+% Session info
+% % CNO Session info:
+% session_name = 'mouseB6_CNO_Day2_Sleep_11_26_2012';
+% injection_time_sec = 614247.3267;
+% Vehicle Session Info
+session_name = 'mouseB6_PBS_Day1_Sleep_11_21_2012';
+injection_time_sec = 179678.6186;
+
+% Channel info (from lab's extraction)
+% % CNO Session:
+% best_theta_channel = 22;
+% best_ripple_channel = 7;
+% Vehicle Session:
+best_theta_channel = 1;
+best_ripple_channel = 7;
+
+% Processing parameters
+theta_SR = 100;          % Theta downsampled to 100 Hz
+ripple_SR = 1000;        % Ripple at 1000 Hz
+theta_filter = [6 12];   % Hz - this is the theta band I extracted (higher frequency theta)
+ripple_filter = [125 300]; % Hz
+
+% Setup
+addpath(neuralynx_path);
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+original_dir = pwd;
+cd(data_path);
+
+fprintf('Session: %s\n', session_name);
+fprintf('Injection time: %.2f sec\n', injection_time_sec);
+fprintf('Theta channel: CSC%d (SR = %d Hz)\n', best_theta_channel, theta_SR);
+fprintf('Ripple channel: CSC%d (SR = %d Hz)\n\n', best_ripple_channel, ripple_SR);
+
+%% ===================================================================
+%% 2. LOAD TABLE DATA
+%% ===================================================================
+
+fprintf('========================================\n');
+fprintf('LOADING TABLE DATA\n');
+fprintf('========================================\n\n');
+
+load(fullfile(table_path, 'Final_Table_for_GLM.mat'), 'Final_GLM_Table');
+session_data = Final_GLM_Table(...
+    strcmp(Final_GLM_Table.SessionName, session_name) & ...
+    strcmp(Final_GLM_Table.AnimalID, 'B6_Probe'), :);
+
+if isempty(session_data)
+    error('Session not found in table!');
+end
+
+fprintf('Found %d timepoints (%.1f to %.1f min)\n\n', ...
+    height(session_data), min(session_data.time_min), max(session_data.time_min));
+
+%% ===================================================================
+%% 3. EXTRACT RAW UNFILTERED LFP (for visualization)
+%% ===================================================================
+
+fprintf('========================================\n');
+fprintf('EXTRACTING RAW UNFILTERED LFP\n');
+fprintf('========================================\n\n');
+
+filename = sprintf('CSC%d_RateReduced.ncs', best_ripple_channel);
+[Timestamps, ~, ~, ~, Samples, Header] = ...
+    Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+
+SR_line = Header{contains(Header, 'SamplingFrequency')};
+original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+
+Samples_flat_raw = Samples(:);
+timestamps_sec = double(Timestamps) * 1e-6;
+
+% Interpolate timestamps for raw data
+Timestamps_buffer = linspace(0, (511/original_SR), 512);
+Time_raw = NaN(size(Samples_flat_raw));
+for i = 1:512
+    Time_raw(i:512:end) = timestamps_sec + Timestamps_buffer(i);
+end
+time_min_raw = (Time_raw - injection_time_sec) / 60;
+
+fprintf('Raw LFP loaded: %d samples, %.2f hours\n', ...
+    length(Samples_flat_raw), length(Samples_flat_raw)/original_SR/3600);
+fprintf('Amplitude range: [%.1f, %.1f] μV\n\n', ...
+    min(Samples_flat_raw), max(Samples_flat_raw));
+
+%% ===================================================================
+%% 4. EXTRACT RIPPLE POWER (Lab's method)
+%% ===================================================================
+
+fprintf('========================================\n');
+fprintf('EXTRACTING RIPPLE POWER\n');
+fprintf('========================================\n\n');
+
+filename = sprintf('CSC%d_RateReduced.ncs', best_ripple_channel);
+fprintf('Reading CSC%d...\n', best_ripple_channel);
+
+[Timestamps, ~, ~, ~, Samples, Header] = ...
+    Nlx2MatCSC(filename, [1 1 1 1 1], 1, 1, []);
+
+SR_line = Header{contains(Header, 'SamplingFrequency')};
+original_SR = str2double(regexp(SR_line, '\d+', 'match'));
+
+Samples_flat = Samples(:);
+timestamps_sec = double(Timestamps) * 1e-6;
+
+% Interpolate timestamps
+Timestamps_buffer = linspace(0, (511/original_SR), 512);
+Time = NaN(size(Samples_flat));
+for i = 1:512
+    Time(i:512:end) = timestamps_sec + Timestamps_buffer(i);
+end
+
+% Interpolate to regular grid
+CSCtime = (min(Time):(1/original_SR):max(Time))';
+signal_interp = interp1(Time, Samples_flat, CSCtime, 'linear');
+
+% Downsample to 1000 Hz
+CSCraw_ripple = resample(signal_interp, ripple_SR, original_SR);
+CSCtime_downsampled = linspace(CSCtime(1), CSCtime(end), numel(CSCraw_ripple))';
+
+% Align to injection time
+time_min_ripple = (CSCtime_downsampled - injection_time_sec) / 60;
+
+fprintf('  Downsampled: %d Hz → %d Hz\n', original_SR, ripple_SR);
+fprintf('  Duration: %.1f min (%.1f to %.1f min)\n\n', ...
+    range(time_min_ripple), min(time_min_ripple), max(time_min_ripple));
+
+% Apply ripple filter (125-300 Hz)
+fprintf('Filtering ripple band (125-300 Hz)...\n');
+filter_order = round(6*ripple_SR/(ripple_filter(2)-ripple_filter(1)));
+norm_freq = ripple_filter / (ripple_SR/2);
+b_ripple = fir1(filter_order, norm_freq, 'bandpass');
+ripple_filtered = filtfilt(b_ripple, 1, CSCraw_ripple);
+
+% Hilbert envelope
+fprintf('Calculating Hilbert envelope...\n');
+ripple_envelope = abs(hilbert(ripple_filtered));
+
+% Smooth with 15 points
+fprintf('Smoothing (15-point moving average)...\n');
+ripple_envelope_smoothed = smooth(ripple_envelope, 15)';
+
+% Z-score
+fprintf('Applying z-score normalization...\n');
+ripple_zscore = zscore(ripple_envelope_smoothed);
+
+fprintf('  Envelope (μV): mean=%.2f, std=%.2f, range=[%.2f, %.2f]\n', ...
+    mean(ripple_envelope_smoothed), std(ripple_envelope_smoothed), ...
+    min(ripple_envelope_smoothed), max(ripple_envelope_smoothed));
+fprintf('  Z-scored: mean=%.4f, std=%.4f\n\n', ...
+    mean(ripple_zscore), std(ripple_zscore));
+
+%% ===================================================================
+%% 5. BIN RIPPLE DATA (1-minute bins)
+%% ===================================================================
+
+fprintf('========================================\n');
+fprintf('BINNING RIPPLE DATA\n');
+fprintf('========================================\n\n');
+
+n_timepoints = height(session_data);
+ripple_envelope_binned = nan(n_timepoints, 1);  % Before z-score (μV)
+ripple_zscore_binned = nan(n_timepoints, 1);    % After z-score
+
+for i = 1:n_timepoints
+    target_time = session_data.time_min(i);
+    mask = time_min_ripple >= (target_time - 0.5) & ...
+           time_min_ripple < (target_time + 0.5);
+    
+    if sum(mask) > 0
+        ripple_envelope_binned(i) = mean(ripple_envelope_smoothed(mask));
+        ripple_zscore_binned(i) = mean(ripple_zscore(mask));
+    end
+end
+
+fprintf('Binned (before z-score, μV): mean=%.2f, std=%.2f\n', ...
+    mean(ripple_envelope_binned, 'omitnan'), std(ripple_envelope_binned, 'omitnan'));
+fprintf('Binned (after z-score): mean=%.4f, std=%.4f\n\n', ...
+    mean(ripple_zscore_binned, 'omitnan'), std(ripple_zscore_binned, 'omitnan'));
+
+%% ===================================================================
+%% 6. VALIDATION: Compare to table
+%% ===================================================================
+
+fprintf('========================================\n');
+fprintf('VALIDATION\n');
+fprintf('========================================\n\n');
+
+valid_idx = ~isnan(ripple_zscore_binned) & ~isnan(session_data.ripple_power_z);
+if sum(valid_idx) > 1
+    [r_ripple, p_ripple] = corr(ripple_zscore_binned(valid_idx), ...
+                                session_data.ripple_power_z(valid_idx));
+    fprintf('Ripple Z-score vs Table: r = %.4f, p = %.2e\n', r_ripple, p_ripple);
+else
+    fprintf('Not enough valid data for correlation\n');
+end
+
+%% ===================================================================
+%% 6.5 COMPARISON PLOT: Extracted vs Table
+%% ===================================================================
+
+fprintf('\n========================================\n');
+fprintf('LOADING LAB RAW EXTRACTION\n');
+fprintf('========================================\n\n');
+
+% Load lab's raw extraction (before they did binning/z-scoring processing)
+lab_extraction_path = 'D:\B6_Probe\mouseB6_PBS_Day1_Sleep_11_21_2012';
+load(fullfile(lab_extraction_path, 'extracted_CSC.mat'), 'out');
+
+% Find CSC7 in their extraction
+csc7_idx = find([out.channel] == 7);
+
+if isempty(csc7_idx)
+    error('CSC7 not found in lab extraction!');
+end
+
+% Get their raw z-scored signal (before binning)
+lab_raw_zscore = out(csc7_idx).ripple_zscore;
+lab_time_sec = out(csc7_idx).CSCtime;
+lab_time_min = (lab_time_sec - injection_time_sec) / 60;
+
+% bin their raw extraction into minute data for visualisation plot 
+n_timepoints = height(session_data);
+lab_ripple_binned = nan(n_timepoints, 1);
+
+for i = 1:n_timepoints
+    target_time = session_data.time_min(i);
+    mask = lab_time_min >= (target_time - 0.5) & ...
+           lab_time_min < (target_time + 0.5);
+    
+    if sum(mask) > 0
+        lab_ripple_binned(i) = mean(lab_raw_zscore(mask));
+    end
+end
+
+fprintf('Lab raw extraction binned: mean=%.4f, std=%.4f\n', ...
+    mean(lab_ripple_binned, 'omitnan'), std(lab_ripple_binned, 'omitnan'));
+
+% My extraction (z-scored)
+my_ripple_z = ripple_zscore_binned;
+
+% Calculate correlation
+valid_idx = ~isnan(your_ripple_z) & ~isnan(lab_ripple_binned);
+[r, ~] = corr(my_ripple_z(valid_idx), lab_ripple_binned(valid_idx));
+
+fprintf('Correlation with LAB RAW: r = %.4f\n', r);
+fprintf('========================================\n\n');
+
+% Create the comparison plot
+figure('Position', [100, 100, 1400, 400]);
+
+plot(session_data.time_min, my_ripple_z, 'b-', 'LineWidth', 1.5, 'DisplayName', 'My Extraction (from raw)');
+hold on;
+plot(session_data.time_min, lab_ripple_binned, 'r--', 'LineWidth', 1.5, 'DisplayName', 'Lab Raw Extraction');
+xline(0, 'k--', 'Injection', 'LineWidth', 2, 'HandleVisibility', 'off');
+
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (z-score)');
+title(sprintf('Comparison: My Extraction vs. Lab raw Extraction (r = %.4f)', r));
+legend('Location', 'northeast');
+xlim([min(session_data.time_min) max(session_data.time_min)]);
+grid on;
+
+saveas(gcf, fullfile(output_path, '6_extracted_vs_LAB_RAW.png'));
+
+%% ===================================================================
+%% 7. PLOTS
+%% ===================================================================
+
+fprintf('\n========================================\n');
+fprintf('GENERATING PLOTS\n');
+fprintf('========================================\n\n');
+
+%% Plot 1: Raw unfiltered LFP (50ms windows)
+figure('Position', [100, 100, 1400, 900]);
+time_windows_raw = [-60, -59.95; -0.05, 0; 0, 0.05; 100, 100.05];
+
+for w = 1:4
+    subplot(4,1,w);
+    t_start = time_windows_raw(w,1);
+    t_end = time_windows_raw(w,2);
+    mask = time_min_raw >= t_start & time_min_raw <= t_end;
+    
+    plot(time_min_raw(mask)*60, Samples_flat_raw(mask), 'k-', 'LineWidth', 0.5);
+    xlabel('Time relative to injection (seconds)');
+    ylabel('Amplitude (μV)');
+    title(sprintf('RAW UNFILTERED LFP: %.2f to %.2f min', t_start, t_end));
+    grid on;
+end
+sgtitle(sprintf('Raw Unfiltered CSC%d - %s', best_ripple_channel, session_name));
+saveas(gcf, fullfile(output_path, '1_raw_unfiltered_LFP.png'));
+
+%% Plot 2: Ripple envelope (before z-scoring, full session)
+figure('Position', [100, 100, 1400, 800]);
+y_min = min(ripple_envelope_smoothed);
+y_max = max(ripple_envelope_smoothed);
+
+subplot(3,1,1);
+plot(time_min_ripple, ripple_envelope_smoothed, 'b-', 'LineWidth', 0.3);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Full Session - mean=%.2f μV', mean(ripple_envelope_smoothed)));
+xlim([min(session_data.time_min) max(session_data.time_min)]);
+ylim([y_min y_max]);
+grid on;
+
+subplot(3,1,2);
+pre_mask = time_min_ripple < 0;
+plot(time_min_ripple(pre_mask), ripple_envelope_smoothed(pre_mask), 'r-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Pre-Injection - mean=%.2f μV', mean(ripple_envelope_smoothed(pre_mask))));
+xlim([min(time_min_ripple(pre_mask)) 0]);
+ylim([y_min y_max]);
+grid on;
+
+subplot(3,1,3);
+post_mask = time_min_ripple >= 0 & time_min_ripple <= 180;
+plot(time_min_ripple(post_mask), ripple_envelope_smoothed(post_mask), 'b-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Post-Injection (0-180 min) - mean=%.2f μV', mean(ripple_envelope_smoothed(post_mask))));
+xlim([0 180]);
+ylim([y_min y_max]);
+grid on;
+
+sgtitle('Raw Ripple Envelope (Linear Amplitude) for Representative Vehicle Session');
+saveas(gcf, fullfile(output_path, '2_ripple_envelope_raw.png'));
+
+%% Plot 3: Ripple envelope - zoomed windows
+figure('Position', [100, 100, 1400, 800]);
+time_windows_zoom = [-60, -50; -10, 0; 0, 10; 50, 60; 100, 110; 200, 210];
+
+for w = 1:6
+    subplot(3,2,w);
+    t_start = time_windows_zoom(w,1);
+    t_end = time_windows_zoom(w,2);
+    mask = time_min_ripple >= t_start & time_min_ripple <= t_end;
+    
+    plot(time_min_ripple(mask), ripple_envelope_smoothed(mask), 'b-', 'LineWidth', 0.8);
+    if t_start <= 0 && t_end >= 0
+        hold on;
+        xline(0, 'k--', 'Injection', 'LineWidth', 2);
+    end
+    xlabel('Time (min)');
+    ylabel('Ripple Envelope (μV)');
+    title(sprintf('%d to %d min (mean=%.2f μV)', t_start, t_end, ...
+        mean(ripple_envelope_smoothed(mask))));
+    ylim([y_min y_max]);
+    grid on;
+end
+sgtitle('Ripple Envelope - Detailed Windows');
+saveas(gcf, fullfile(output_path, '3_ripple_envelope_zoomed.png'));
+
+%% Plot 4: Binned ripple (before vs after z-scoring)
+figure('Position', [100, 100, 1400, 600]);
+
+subplot(2,1,1);
+plot(session_data.time_min, ripple_envelope_binned, 'b-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title('BEFORE Z-scoring: Linear Amplitude (1-min bins)');
+xlim([min(session_data.time_min) max(session_data.time_min)]);
+grid on;
+
+subplot(2,1,2);
+plot(session_data.time_min, ripple_zscore_binned, 'r-', 'LineWidth', 1.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Power (z-score)');
+title('AFTER Z-scoring: Dimensionless (mean=0, std≈1)');
+xlim([min(session_data.time_min) max(session_data.time_min)]);
+grid on;
+
+sgtitle('Comparison: Before vs After Z-scoring');
+saveas(gcf, fullfile(output_path, '4_binned_before_after_zscore.png'));
+
+%% Plot 5: Validation - compare to table
+figure('Position', [100, 100, 1400, 600]);
+
+subplot(2,1,1);
+plot(session_data.time_min, ripple_zscore_binned, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(session_data.time_min, session_data.ripple_power_z, 'r.', 'MarkerSize', 8);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Power (z-score)');
+title(sprintf('Validation: Extraction vs Table (r = %.4f)', r_ripple));
+legend({'My extraction', 'Table'}, 'Location', 'best');
+xlim([min(session_data.time_min) max(session_data.time_min)]);
+grid on;
+
+subplot(2,1,2);
+scatter(session_data.ripple_power_z, ripple_zscore_binned, 20, 'b', 'filled', 'MarkerFaceAlpha', 0.5);
+hold on;
+plot([-1 1], [-1 1], 'k--', 'LineWidth', 1.5);
+xlabel('Table ripple\_power\_z');
+ylabel('Extracted ripple\_power\_z');
+title(sprintf('Scatter Plot (r = %.4f)', r_ripple));
+axis equal;
+grid on;
+
+sgtitle('Validation Against Table');
+saveas(gcf, fullfile(output_path, '5_validation_vs_table.png'));
+
+%% ===================================================================
+%% 8. SAVE RESULTS
+%% ===================================================================
+
+fprintf('\n========================================\n');
+fprintf('SAVING RESULTS\n');
+fprintf('========================================\n\n');
+
+% Save extracted data
+results.session_name = session_name;
+results.injection_time_sec = injection_time_sec;
+results.best_ripple_channel = best_ripple_channel;
+results.ripple_SR = ripple_SR;
+results.time_min = time_min_ripple;
+results.ripple_envelope_uV = ripple_envelope_smoothed;
+results.ripple_zscore = ripple_zscore;
+results.ripple_envelope_binned = ripple_envelope_binned;
+results.ripple_zscore_binned = ripple_zscore_binned;
+results.correlation_with_table = r_ripple;
+
+save(fullfile(output_path, 'ripple_extraction_results.mat'), 'results', '-v7.3');
+fprintf('Saved: ripple_extraction_results.mat\n');
+
+%% ===================================================================
+%% 9. SUMMARY
+%% ===================================================================
+
+fprintf('\n========================================\n');
+fprintf('SUMMARY\n');
+fprintf('========================================\n\n');
+
+fprintf('Session: %s\n', session_name);
+fprintf('Channel: CSC%d\n', best_ripple_channel);
+fprintf('Duration: %.1f min (%.1f to %.1f min)\n', ...
+    range(time_min_ripple), min(time_min_ripple), max(time_min_ripple));
+fprintf('\nRaw envelope statistics:\n');
+fprintf('  Mean: %.2f μV\n', mean(ripple_envelope_smoothed));
+fprintf('  Std: %.2f μV\n', std(ripple_envelope_smoothed));
+fprintf('  Range: [%.2f, %.2f] μV\n', min(ripple_envelope_smoothed), max(ripple_envelope_smoothed));
+fprintf('\nValidation:\n');
+fprintf('  Correlation with table: r = %.4f\n', r_ripple);
+fprintf('\nOutput: %s\n', output_path);
+fprintf('\n========================================\n');
+
+cd(original_dir);
+fprintf('COMPLETE!\n');
+fprintf('========================================\n\n');
+
+%% Plot 2b: Ripple envelope - Pre, Post early, Post late
+figure('Position', [100, 100, 1400, 1000]);
+y_min = min(ripple_envelope_smoothed);
+y_max = max(ripple_envelope_smoothed);
+
+% Full session
+subplot(4,1,1);
+plot(time_min_ripple, ripple_envelope_smoothed, 'b-', 'LineWidth', 0.3);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Full Session - mean=%.2f μV', mean(ripple_envelope_smoothed)));
+xlim([min(session_data.time_min) max(session_data.time_min)]);
+ylim([y_min y_max]);
+grid on;
+
+% Pre-injection
+subplot(4,1,2);
+pre_mask = time_min_ripple < 0;
+plot(time_min_ripple(pre_mask), ripple_envelope_smoothed(pre_mask), 'r-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Pre-Injection: Baseline (mean = %.2f μV)', mean(ripple_envelope_smoothed(pre_mask))));
+xlim([min(time_min_ripple(pre_mask)) 0]);
+ylim([y_min y_max]);
+grid on;
+
+% Post-injection 0-120 min
+subplot(4,1,3);
+post_early_mask = time_min_ripple >= 0 & time_min_ripple <= 120;
+plot(time_min_ripple(post_early_mask), ripple_envelope_smoothed(post_early_mask), 'b-', 'LineWidth', 0.5);
+xline(0, 'k--', 'Injection', 'LineWidth', 2);
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Post-Injection: 0-120 min (mean = %.2f μV)', mean(ripple_envelope_smoothed(post_early_mask))));
+xlim([0 120]);
+ylim([y_min y_max]);
+grid on;
+
+% Post-injection 120+ min
+subplot(4,1,4);
+post_late_mask = time_min_ripple > 120;
+plot(time_min_ripple(post_late_mask), ripple_envelope_smoothed(post_late_mask), 'g-', 'LineWidth', 0.5);
+xlabel('Time relative to injection (min)');
+ylabel('Ripple Envelope (μV)');
+title(sprintf('Post-Injection: 120+ min (mean = %.2f μV)', mean(ripple_envelope_smoothed(post_late_mask))));
+xlim([120 max(time_min_ripple)]);
+ylim([y_min y_max]);
+grid on;
+
+sgtitle('Ripple Envelope (Raw Ripple-Band Linear Amplitude - Vehicle Session)');
+saveas(gcf, fullfile(output_path, '2_ripple_envelope_raw.png'));
