@@ -1,0 +1,115 @@
+%% SCRIPT TO GENERATE "NEURAL & BEHAVIOURAL FINGERPRINT" SUMMARY PLOTS
+% 
+% This script creates summary bar charts comparing the neural AND speed
+% signatures of ALL 5 original behavioural states.
+% 
+% It helps validate whether behavioural state classifications are indeed reflected by the expected neural signatures 
+
+clc; clear; close all;
+fprintf('Starting neural & behavioural fingerprint summary plot generation...\n');
+
+%% --- 1A. Load Data ---
+try
+    data_file = 'Final_Table_for_GLM_cleanMUA_NewZ.mat';
+    load(data_file, 'Final_GLM_Table');
+    fprintf('  Loaded data from %s (found %d original rows)\n', data_file, height(Final_GLM_Table));
+catch ME
+    fprintf('  ERROR: Could not load data file: %s\n', data_file);
+    rethrow(ME);
+end
+
+%% --- 1B. STANDARD CLEANING (Same as your main plots) ---
+fprintf('  Cleaning data...\n');
+
+problem_session1 = 'mouseD12_050213_Day6_PBS';
+problem_session2 = 'mouseD12_050913_Day7_CNO';
+
+is_bad_session = strcmp(Final_GLM_Table.SessionName, problem_session1) | ...
+                 strcmp(Final_GLM_Table.SessionName, problem_session2);
+good_sessions_mask = ~is_bad_session;
+has_speed_data = ~isnan(Final_GLM_Table.speed_z_px_s);
+total_keep_mask = good_sessions_mask & has_speed_data;
+
+Final_GLM_Table = Final_GLM_Table(total_keep_mask, :);
+fprintf('  Data cleaned. Proceeding with %d rows.\n', height(Final_GLM_Table));
+
+%% --- 2. Define States and Metrics ---
+states_to_compare = {'Sleep', 'Still', 'StillActive', 'Mixed', 'Moving'};
+
+% Define nice display names for the plot
+state_display_names = {'Sleep', 'Still', 'Still & Active', 'Mixed', 'Moving'};
+n_states = length(states_to_compare);
+
+% Added Speed AND MUA to the metrics list
+metrics_to_plot = {
+    struct('Name', 'Speed (Z-scored)', 'Col', 'speed_z_px_s'), ...
+    struct('Name', 'Multi-Unit Activity (Z-scored Hz)', 'Col', 'MUA_Z_New'), ...
+    struct('Name', 'Ripple Events (per min)', 'Col', 'ripple_events'), ...
+    struct('Name', 'Theta Power (Z-scored)', 'Col', 'theta_power_z_corrected')
+};
+
+state_colors = [
+    0.4940 0.1840 0.5560;  % Sleep (Purple)
+    0.0000 0.4470 0.7410;  % Still (Dark Blue)
+    0.3010 0.7450 0.9330;  % StillActive (Light Blue)
+    0.4660 0.6740 0.1880;  % Mixed (Green)
+    0.8500 0.3250 0.0980   % Moving (Orange/Red)
+];
+
+%% --- 3. Calculate Means and SEMs ---
+fprintf('  Calculating state statistics...\n');
+
+state_means = NaN(n_states, length(metrics_to_plot));
+state_sems = NaN(n_states, length(metrics_to_plot));
+
+for i = 1:n_states
+    state_mask = strcmp(Final_GLM_Table.BehaviouralState, states_to_compare{i});
+    
+    for j = 1:length(metrics_to_plot)
+        data_col = Final_GLM_Table.(metrics_to_plot{j}.Col)(state_mask);
+        
+        % Calculate mean and standard error of the mean (SEM)
+        state_means(i,j) = nanmean(data_col);
+        state_sems(i,j) = nanstd(data_col) / sqrt(sum(~isnan(data_col)));
+    end
+end
+
+%% --- 4. Create the Fingerprint Plot (Now 4 panels) ---
+fig = figure('Position', [50, 100, 1800, 500], 'Color', 'w'); % Widened for 4th panel
+t = tiledlayout(1, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+for j = 1:length(metrics_to_plot)
+    ax = nexttile;
+    hold(ax, 'on');
+    
+    % Plot each bar individually to control color
+    for i = 1:n_states
+        b = bar(ax, i, state_means(i,j), 'FaceColor', state_colors(i,:), 'EdgeColor', 'none');
+        
+        % Add error bars
+        errorbar(ax, i, state_means(i,j), state_sems(i,j), 'k', 'LineWidth', 1.5, 'CapSize', 10);
+    end
+    
+    % Formatting
+    ylabel(ax, metrics_to_plot{j}.Name, 'FontSize', 12, 'FontWeight', 'bold');
+    xticks(ax, 1:n_states);
+    
+    % Use the new display names here
+    xticklabels(ax, state_display_names);
+    ax.XAxis.FontSize = 10;
+    ax.XAxis.FontWeight = 'bold';
+    
+    yline(ax, 0, 'k--', 'LineWidth', 1);  % Baseline
+    grid(ax, 'on');
+    box(ax, 'off');
+    
+end
+
+sgtitle('Fingerprints of Behavioural States', 'FontSize', 16, 'FontWeight', 'bold');
+
+%% --- 5. Save ---
+plot_folder = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\FinalTimeCoursePlots';
+saveas(fig, fullfile(plot_folder, 'Complete_State_Fingerprints_withMUA.png'));
+saveas(fig, fullfile(plot_folder, 'Complete_State_Fingerprints_withMUA.fig'));
+
+fprintf('\n=== Complete fingerprint plot saved! ===\n');
