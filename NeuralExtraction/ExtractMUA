@@ -1,0 +1,1131 @@
+%% ========================================================================
+% SCRIPT FOR MUA EXTRACTION AND GLM TABLE BUILDING
+% =========================================================================
+% PURPOSE:
+% Exactly replicates the validation script logic but re-extracts all MUA 
+% from the raw data and adds to the final glm table 
+% =========================================================================
+
+%% PHASE 0: SETUP PATHS AND LOAD DATA
+% clc; 
+% clear all; 
+% close all;
+cd('C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis');
+
+disp('========================================');
+disp('MUA VALIDATION - MEMORY-EFFICIENT (EXACT REPLICATION)');
+disp('========================================');
+
+% --- Define Base Paths ---
+raw_data_root = 'D:\';
+analysis_root = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+position_base_path = fullfile(analysis_root, 'RawBehaviouralAnalysis\PositionExtraction');
+
+% --- Load the Final_GLM_Table and Injection_Times ---
+disp('Loading Final_GLM_Table...');
+load(fullfile(analysis_root, 'Final_Table_for_GLM_rawMUA.mat'));
+
+disp('Loading Injection_Times...');
+Injection_Times = readtable(fullfile(analysis_root, 'Injection_Times.csv'));
+
+% --- Get unique sessions from the table ---
+unique_sessions = unique(Final_GLM_Table.SessionName);
+num_sessions = length(unique_sessions);
+disp(['Found ', num2str(num_sessions), ' unique sessions to process.']);
+
+% --- Add new column if it doesn't exist ---
+new_col_name = 'MUA_mean_Hz_replicated';
+if ~ismember(new_col_name, Final_GLM_Table.Properties.VariableNames)
+    disp(['Adding new column: ', new_col_name]);
+    Final_GLM_Table.(new_col_name) = nan(height(Final_GLM_Table), 1);
+else
+    disp(['Column ', new_col_name, ' already exists. Will overwrite values.']);
+end
+
+% --- Parameters ---
+threshold_uV = 100;
+CHUNK_SIZE_MINUTES = 30; % Process in chunks for very long sessions to save computational power
+
+%% MAIN LOOP: PROCESS EACH SESSION
+for session_idx = 1:num_sessions
+    
+    session_name = unique_sessions{session_idx};
+    
+    disp(' ');
+    disp('========================================');
+    disp(['PROCESSING SESSION ', num2str(session_idx), '/', num2str(num_sessions)]);
+    disp(['Session: ', session_name]);
+    disp('========================================');
+    
+    try
+        % --- Extract animal name from session name ---
+        animal_name = regexp(session_name, 'mouse([A-Z]\d+)', 'tokens');
+        if ~isempty(animal_name)
+            animal_id = animal_name{1}{1};
+            
+            % Check if this mouse has a _Probe folder
+            probe_path = fullfile(raw_data_root, [animal_id, '_Probe']);
+            normal_path = fullfile(raw_data_root, animal_id);
+            
+            if exist(probe_path, 'dir')
+                animal_name = [animal_id, '_Probe'];
+                disp(['  Using _Probe folder: ', animal_name]);
+            elseif exist(normal_path, 'dir')
+                animal_name = animal_id;
+            else
+                warning(['Could not find data folder for animal: ', animal_id]);
+                continue;
+            end
+        else
+            warning(['Could not extract animal name from: ', session_name]);
+            continue;
+        end
+        
+        % --- Construct the full data path ---
+        session_data_path = fullfile(raw_data_root, animal_name, session_name, 'raw');
+        
+        if ~exist(session_data_path, 'dir')
+            warning(['Directory does not exist: ', session_data_path]);
+            continue;
+        end
+        
+        disp(['Data path: ', session_data_path]);
+        
+        %% PHASE 1: DISCOVER TETRODES
+        disp('PHASE 1: Discovering tetrodes...');
+        
+        ntt_files = dir(fullfile(session_data_path, 'TT*.ntt'));
+        tetrodes_to_process = [];
+        for i = 1:length(ntt_files)
+            tetrode_num_str = regexp(ntt_files(i).name, '\d+', 'match');
+            if ~isempty(tetrode_num_str)
+                tetrodes_to_process(end+1) = str2double(tetrode_num_str{1});
+            end
+        end
+        tetrodes_to_process = sort(tetrodes_to_process);
+        
+        if isempty(tetrodes_to_process)
+            warning(['No .ntt files found for: ', session_name]);
+            continue;
+        end
+        
+        disp(['Found ', num2str(length(tetrodes_to_process)), ' tetrodes: ', num2str(tetrodes_to_process)]);
+        
+        %% PHASE 2: LOAD POSITION DATA
+        disp('PHASE 2: Loading position data...');
+        
+        position_data_path = fullfile(position_base_path, animal_name, session_name);
+        position_filename = fullfile(position_data_path, 'position_a_s_sc_inj_aligned.mat');
+        
+        if ~exist(position_filename, 'file')
+            warning(['Position file does not exist: ', position_filename]);
+            continue;
+        end
+        
+        load(position_filename);
+        
+        % --- Get timestamps ---
+        injection_timestamp_us = clean_position.timestamps.injection_s * 1e6;
+        session_start_us = clean_position.timestamps.session_start_s * 1e6;
+        session_end_us = clean_position.timestamps.session_end_s * 1e6;
+        
+        % --- Create time bins EXACTLY as in validation script ---
+        % NOTE: These are the actual data points, NOT bin edges!
+        time_bins_1ms = session_start_us:1000:session_end_us;
+        
+        session_duration_s = (session_end_us - session_start_us) / 1e6;
+        disp(['Session duration: ', num2str(session_duration_s), ' seconds (', ...
+              num2str(session_duration_s/60, '%.1f'), ' minutes)']);
+        disp(['Number of 1ms time points: ', num2str(length(time_bins_1ms))]);
+        
+        % Determine if we need chunked processing
+        USE_CHUNKED = length(time_bins_1ms) > 1.8e6; % ~30 minutes
+        
+        if USE_CHUNKED
+            disp('*** Using chunked processing for memory efficiency ***');
+        end
+        
+        %% PHASE 3: EXTRACT AND BIN SPIKES (WITH CHUNKING IF NEEDED)
+        disp('PHASE 3: Extracting spikes...');
+        
+        % Initialize spike count array
+        if USE_CHUNKED
+            % For very long sessions, process in chunks
+            total_spike_counts = [];  % Will build this chunk by chunk
+            chunk_size_points = CHUNK_SIZE_MINUTES * 60 * 1000; % points per chunk
+        else
+            total_spike_counts = zeros(1, length(time_bins_1ms));
+        end
+        
+        active_tetrode_count = 0;
+        
+        for tt = tetrodes_to_process
+            filename = fullfile(session_data_path, ['TT', num2str(tt), '.ntt']);
+            
+            FieldSelectionFlags = [1 0 0 1 0];
+            
+            try
+                [timestamps, Params, header] = Nlx2MatSpike(filename, FieldSelectionFlags, 1, 1, []);
+            catch
+                try
+                    [timestamps, Params] = Nlx2MatSpike(filename, FieldSelectionFlags, 0, 1, []);
+                    header = {};
+                catch
+                    warning(['Could not load: ', filename]);
+                    continue;
+                end
+            end
+            
+            if isempty(timestamps)
+                disp(['  Tetrode ', num2str(tt), ': No spikes, skipping.']);
+                continue;
+            end
+            
+            % --- Extract ADBitVolts ---
+            ADBitVolts = [];
+            if ~isempty(header)
+                for i = 1:length(header)
+                    if contains(header{i}, '-ADBitVolts')
+                        parts = strsplit(header{i});
+                        if length(parts) >= 5
+                            try
+                                ADBitVolts = [str2double(parts{2}), str2double(parts{3}), ...
+                                             str2double(parts{4}), str2double(parts{5})];
+                                break;
+                            catch
+                                ADBitVolts = [];
+                            end
+                        end
+                    end
+                end
+            end
+            
+            if isempty(ADBitVolts)
+                ADBitVolts = [0.305, 0.305, 0.305, 0.305] * 1e-6;
+            end
+            
+            active_tetrode_count = active_tetrode_count + 1;
+            
+            % --- Apply Threshold ---
+            PeakAmplitudes_AD = Params(1:4, :);
+            PeakAmplitudes_Volts = PeakAmplitudes_AD .* ADBitVolts';
+            max_peak_V = max(abs(PeakAmplitudes_Volts), [], 1);
+            
+            threshold_V = threshold_uV * 1e-6;
+            passing_spikes_idx = find(max_peak_V > threshold_V);
+            passing_timestamps = timestamps(passing_spikes_idx);
+            
+            % --- Bin the spike times using histc (EXACTLY as validation script) ---
+            if USE_CHUNKED
+                % Process in chunks to save memory
+                num_chunks = ceil(length(time_bins_1ms) / chunk_size_points);
+                tt_spike_counts = zeros(1, length(time_bins_1ms));
+                
+                for chunk_idx = 1:num_chunks
+                    start_idx = (chunk_idx-1) * chunk_size_points + 1;
+                    end_idx = min(chunk_idx * chunk_size_points, length(time_bins_1ms));
+                    
+                    chunk_bins = time_bins_1ms(start_idx:end_idx);
+                    
+                    % Find spikes in this time range
+                    chunk_spikes = passing_timestamps(passing_timestamps >= chunk_bins(1) & ...
+                                                     passing_timestamps <= chunk_bins(end));
+                    
+                    if ~isempty(chunk_spikes)
+                        binned_counts = histc(chunk_spikes, chunk_bins);
+                        if size(binned_counts, 1) > 1
+                            binned_counts = binned_counts';
+                        end
+                        tt_spike_counts(start_idx:start_idx+length(binned_counts)-1) = binned_counts;
+                    end
+                    
+                    if mod(chunk_idx, 10) == 0
+                        fprintf('    TT%d: Processed chunk %d/%d\n', tt, chunk_idx, num_chunks);
+                    end
+                end
+                
+                if isempty(total_spike_counts)
+                    total_spike_counts = tt_spike_counts;
+                else
+                    total_spike_counts = total_spike_counts + tt_spike_counts;
+                end
+                
+            else
+                % For shorter sessions, process all at once
+                binned_counts = histc(passing_timestamps, time_bins_1ms);
+                if size(binned_counts, 1) > 1
+                    binned_counts = binned_counts';
+                end
+                total_spike_counts = total_spike_counts + binned_counts;
+            end
+            
+            if mod(tt, 2) == 0 || tt == tetrodes_to_process(end)
+                disp(['  Processed tetrode ', num2str(tt)]);
+            end
+        end
+        
+        if active_tetrode_count == 0
+            warning(['No active tetrodes for: ', session_name]);
+            continue;
+        end
+        
+        disp(['Processed ', num2str(active_tetrode_count), ' tetrodes.']);
+        
+        %% PHASE 4: SMOOTH AND BIN TO 1-MINUTE (EXACTLY AS VALIDATION SCRIPT)
+        disp('PHASE 4: Smoothing and binning to 1-minute...');
+        
+        % --- Average and Smooth EXACTLY as validation script ---
+        avg_spike_counts = total_spike_counts / active_tetrode_count;
+        
+        % Apply Gaussian smoothing with 60-point window, alpha=15
+        smoothed_mua_1ms = filter(gausswin(60, 15), 1, avg_spike_counts);
+        
+        % --- BIN TO 1-MINUTE EXACTLY as validation script ---
+        minute_bins_us = session_start_us:60*1e6:session_end_us;
+        replicated_mua_1min_avg = [];
+        
+        for i = 1:length(minute_bins_us)-1
+            start_time = minute_bins_us(i);
+            end_time = minute_bins_us(i+1);
+            
+            % Find indices in time_bins_1ms that fall within this minute
+            idx = find(time_bins_1ms >= start_time & time_bins_1ms < end_time);
+            
+            if ~isempty(idx)
+                replicated_mua_1min_avg(i) = mean(smoothed_mua_1ms(idx));
+            else
+                replicated_mua_1min_avg(i) = NaN;
+            end
+        end
+        
+        disp(['Created ', num2str(length(replicated_mua_1min_avg)), ' one-minute bins.']);
+        
+        % Clear large arrays to save memory
+        clear total_spike_counts avg_spike_counts smoothed_mua_1ms;
+        
+        %% PHASE 5: CONVERT TO TIME RELATIVE TO INJECTION
+        disp('PHASE 5: Converting to injection-relative time...');
+        
+        % Calculate center of each minute bin
+        minute_bin_centers_us = (minute_bins_us(1:end-1) + minute_bins_us(2:end)) / 2;
+        time_relative_injection_min = (minute_bin_centers_us - injection_timestamp_us) / (60 * 1e6);
+        
+        %% PHASE 6: ALIGN WITH FINAL_GLM_TABLE
+        disp('PHASE 6: Aligning with Final_GLM_Table...');
+        
+        session_rows_in_glm = find(strcmp(Final_GLM_Table.SessionName, session_name));
+        
+        if isempty(session_rows_in_glm)
+            warning(['No rows found in Final_GLM_Table for: ', session_name]);
+            continue;
+        end
+        
+        time_min_in_table = Final_GLM_Table.time_min(session_rows_in_glm);
+        
+        % Round both to nearest minute for matching (as in validation script)
+        replicated_time_rounded = round(time_relative_injection_min);
+        table_time_rounded = round(time_min_in_table);
+        
+        % Align using rounded times
+        aligned_replicated_Hz = nan(size(time_min_in_table));
+        tolerance_min = 0.5; % Allow half-minute tolerance
+        
+        for i = 1:length(table_time_rounded)
+            time_target = table_time_rounded(i);
+            [min_diff, closest_idx] = min(abs(replicated_time_rounded - time_target));
+            
+            if min_diff <= tolerance_min && closest_idx <= length(replicated_mua_1min_avg)
+                aligned_replicated_Hz(i) = replicated_mua_1min_avg(closest_idx);
+            end
+        end
+        
+        % Sort before assignment
+        [~, sort_idx] = sort(time_min_in_table);
+        [~, orig_indices] = sort(sort_idx);
+        target_rows = session_rows_in_glm(orig_indices);
+        
+        % Verify and assign
+        if length(target_rows) == length(aligned_replicated_Hz)
+            Final_GLM_Table.(new_col_name)(target_rows) = aligned_replicated_Hz;
+            num_valid = sum(~isnan(aligned_replicated_Hz));
+            disp(['SUCCESS: Added ', num2str(num_valid), '/', num2str(length(target_rows)), ...
+                  ' valid values for session.']);
+        else
+            warning(['Mismatch in row counts for: ', session_name]);
+        end
+        
+    catch ME
+        warning(['ERROR processing session: ', session_name]);
+        disp(['Error: ', ME.message]);
+        continue;
+    end
+end
+
+%% FINAL: SAVE THE UPDATED TABLE
+
+%  Final_GLM_Table.MUA_mean_Hz_replicated = Final_GLM_Table.MUA_mean_Hz_replicated*1000;
+
+disp(' ');
+disp('========================================');
+disp('SAVING UPDATED TABLE');
+disp('========================================');
+
+output_path = fullfile(analysis_root, 'Final_Table_for_GLM_rawMUA.mat');
+disp(['Saving to: ', output_path]);
+save(output_path, 'Final_GLM_Table', '-v7.3');
+
+disp(' ');
+disp('========================================');
+disp('SCRIPT COMPLETE!');
+disp('========================================');
+
+% Summary statistics
+num_non_nan = sum(~isnan(Final_GLM_Table.(new_col_name)));
+num_nan = sum(isnan(Final_GLM_Table.(new_col_name)));
+disp(['Total non-NaN values: ', num2str(num_non_nan), '/', num2str(height(Final_GLM_Table))]);
+disp(['Success rate: ', num2str(100*num_non_nan/height(Final_GLM_Table), '%.1f'), '%']);
+
+
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% %% FIND INDIVIDUAL ANIMAL SESSION ARTIFACT LOCATIONS 
+% % (based on visual identification from previous plots)
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 
+% % --- Configuration ---
+% analysis_root = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+% table_filename = 'Final_Table_for_GLM_rawMUA.mat';
+% mua_col_name = 'MUA_mean_Hz_replicated';
+% 
+% % --- Load the Table ---
+% table_path = fullfile(analysis_root, table_filename);
+% fprintf('Loading table: %s\n', table_path);
+% load(table_path, 'Final_GLM_Table');
+% 
+% % --- Select Animal and Condition to Investigate ---
+% target_animal = 'B6_Probe'; % CHANGE THIS
+% target_condition = 'CNO'; % CHANGE THIS ('CNO' or 'Vehicle')
+% time_window = [-20, 0]; % Optional: Zoom in on the artifact time range [min, max]
+% 
+% fprintf('Investigating Animal: %s, Condition: %s\n', target_animal, target_condition);
+% 
+% % --- Find Sessions for this Animal/Condition ---
+% sessions_to_plot = unique(Final_GLM_Table.SessionName( ...
+%     strcmp(Final_GLM_Table.AnimalID, target_animal) & ...
+%     strcmp(Final_GLM_Table.Condition, target_condition)));
+% 
+% if isempty(sessions_to_plot)
+%     error('No sessions found for this animal/condition combination.');
+% end
+% 
+% fprintf('Found %d session(s) to plot:\n', length(sessions_to_plot));
+% disp(sessions_to_plot);
+% 
+% % --- Create Plot ---
+% figure('Name', sprintf('MUA Sessions for %s (%s)', target_animal, target_condition), ...
+%        'Position', [100, 100, 900, 600]);
+% hold on;
+% colors = lines(length(sessions_to_plot)); % Different color for each session
+% 
+% for i = 1:length(sessions_to_plot)
+%     session = sessions_to_plot{i};
+%     session_data = Final_GLM_Table(strcmp(Final_GLM_Table.SessionName, session), :);
+% 
+%     % Get MUA and time for this specific session
+%     time_points = session_data.time_min;
+%     mua_values = session_data.(mua_col_name);
+% 
+%     % Sort by time just in case table isn't ordered
+%     [time_points_sorted, sort_idx] = sort(time_points);
+%     mua_values_sorted = mua_values(sort_idx);
+% 
+%     % Plot only valid points
+%     valid_idx = ~isnan(mua_values_sorted);
+%     if sum(valid_idx) > 0
+%         plot(time_points_sorted(valid_idx), mua_values_sorted(valid_idx), '.-', ...
+%              'Color', colors(i,:), 'LineWidth', 1, 'MarkerSize', 5, ...
+%              'DisplayName', strrep(session, '_', '\_')); % Display session name in legend
+%     end
+% end
+% 
+% % --- Formatting ---
+% xline(0, 'k--', 'Injection', 'LineWidth', 1.5, 'HandleVisibility', 'off');
+% xlabel('Time Relative to Injection (min)');
+% ylabel('Mean MUA Rate (Hz)');
+% title(sprintf('Individual MUA Sessions for %s (%s)', target_animal, target_condition));
+% legend('Location', 'best', 'Interpreter', 'none'); % Interpreter none prevents underscores acting weird
+% grid on;
+% hold off;
+% 
+% % Apply time window zoom if specified
+% if ~isempty(time_window)
+%     xlim(time_window);
+% end
+% 
+% disp('Plot generated. Inspect the plot to identify the session with the artifact.');
+% 
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% %% REMOVING IDENTIFIED ARTIFACTS FROM SESSION ROWS IN GLM TABLE
+% %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% 
+% clc;
+% clearvars;
+% close all;
+% 
+% % --- Configuration ---
+% analysis_root = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+% table_filename_in = 'Final_Table_for_GLM_rawMUA.mat'; % Input file
+% table_filename_out = 'Final_Table_for_GLM_cleanMUA.mat'; % Output file
+% mua_col_name = 'MUA_mean_Hz_replicated';
+% 
+% % --- Define artifact windows ---
+% % Format: Each row is {AnimalID, Condition, SessionName, Start Min, End Min}
+% artifacts = { ...
+%     'D12_Probe', 'Vehicle', 'mouseD12_042213_Day1_PBS', 15, 23; ...
+%     'B7', 'Vehicle', 'mouseB7_VEHICLE_082812_day1', -3, -1; ...
+%     'B7', 'CNO', 'mouseB7_CNO_082912_day2', -2, 1; ...
+%     'B7', 'CNO', 'mouseB7_CNO_082712_day1', -2, 0; ...
+%     'B6_Probe', 'CNO', 'mouseB6_CNO_Day4_run_12_03_12', -10, -7 ...
+% };
+% 
+% % --- Load the Table ---
+% table_path_in = fullfile(analysis_root, table_filename_in);
+% fprintf('Loading table: %s\n', table_path_in);
+% if exist(table_path_in, 'file')
+%     load(table_path_in, 'Final_GLM_Table');
+% else
+%     error('Input table file not found: %s', table_path_in);
+% end
+% 
+% fprintf('Table loaded. Initial size: %d rows.\n', height(Final_GLM_Table));
+% if ~ismember(mua_col_name, Final_GLM_Table.Properties.VariableNames)
+%     error('MUA column "%s" not found in the table.', mua_col_name);
+% end
+% 
+% initial_nan_count = sum(isnan(Final_GLM_Table.(mua_col_name)));
+% fprintf('Initial count of NaNs in %s: %d\n', mua_col_name, initial_nan_count);
+% 
+% %% --- Loop Through Artifacts and Set to NaN ---
+% total_removed = 0;
+% 
+% for i = 1:size(artifacts, 1)
+%     animal_id = artifacts{i, 1};
+%     condition = artifacts{i, 2};
+%     session_name_filter = artifacts{i, 3};
+%     time_start = artifacts{i, 4};
+%     time_end = artifacts{i, 5};
+% 
+%     fprintf('\nProcessing artifact %d: Animal=%s, Condition=%s, Session=%s, Time=[%.1f, %.1f]\n', ...
+%             i, animal_id, condition, session_name_filter, time_start, time_end);
+% 
+%     % --- Build Logical Index ---
+%     animal_match = strcmp(Final_GLM_Table.AnimalID, animal_id);
+%     condition_match = strcmp(Final_GLM_Table.Condition, condition);
+%     session_match = strcmp(Final_GLM_Table.SessionName, session_name_filter);
+%     time_match = Final_GLM_Table.time_min >= time_start & Final_GLM_Table.time_min <= time_end;
+% 
+%     % Combine indices
+%     rows_to_nan = animal_match & condition_match & session_match & time_match;
+%     num_found = sum(rows_to_nan);
+% 
+%     if num_found > 0
+%         fprintf('  Found %d data points matching criteria.\n', num_found);
+% 
+%         % Show before values
+%         before_vals = Final_GLM_Table.(mua_col_name)(rows_to_nan);
+%         num_already_nan = sum(isnan(before_vals));
+%         fprintf('  (%d were already NaN)\n', num_already_nan);
+% 
+%         % Set to NaN
+%         Final_GLM_Table.(mua_col_name)(rows_to_nan) = NaN;
+%         total_removed = total_removed + num_found;
+%         fprintf('  Set %d values to NaN.\n', num_found);
+%     else
+%         warning('  No data points found matching criteria! Check session name, animal ID, and time range.');
+%     end
+% end
+% 
+% %% --- Final Summary and Save ---
+% final_nan_count = sum(isnan(Final_GLM_Table.(mua_col_name)));
+% actual_removed = final_nan_count - initial_nan_count;
+% 
+% fprintf('\n========================================\n');
+% fprintf('ARTIFACT REMOVAL COMPLETE\n');
+% fprintf('========================================\n');
+% fprintf('Total data points targeted: %d\n', total_removed);
+% fprintf('Actual new NaNs added: %d\n', actual_removed);
+% fprintf('Final NaN count in %s: %d / %d (%.1f%%)\n', ...
+%         mua_col_name, final_nan_count, height(Final_GLM_Table), ...
+%         100*final_nan_count/height(Final_GLM_Table));
+% 
+% % --- Save the updated table ---
+% table_path_out = fullfile(analysis_root, table_filename_out);
+% fprintf('\nSaving updated table to: %s\n', table_path_out);
+% try
+%     save(table_path_out, 'Final_GLM_Table', '-v7.3');
+%     fprintf('SUCCESS: Table saved to %s\n', table_filename_out);
+% catch ME_save
+%     warning('Failed to save the updated table! Error: %s', ME_save.message);
+%     disp('The modified table is available in the workspace variable Final_GLM_Table.');
+% end
+% fprintf('========================================\n');
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PLOTTING: RAW MUA OVER TIME
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+close all;
+load('Final_Table_for_GLM_cleanMUA.mat')
+disp(' ');
+disp('========================================');
+disp('GENERATING PLOTS');
+disp('========================================');
+
+% Get unique conditions and animals
+unique_conditions = unique(Final_GLM_Table.Condition);
+unique_animals = unique(Final_GLM_Table.AnimalID);
+
+% --- PLOT 1: Average MUA by Condition ---
+figure('Name', 'Raw MUA by Condition', 'Position', [100, 100, 1000, 600]);
+hold on;
+
+condition_colors = lines(length(unique_conditions));
+
+for c = 1:length(unique_conditions)
+    condition = unique_conditions{c};
+    condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition), :);
+    
+    time_points = unique(condition_data.time_min);
+    mean_mua = zeros(length(time_points), 1);
+    sem_mua = zeros(length(time_points), 1);
+    
+    for t = 1:length(time_points)
+        time_data = condition_data(condition_data.time_min == time_points(t), :);
+        mua_values = time_data.MUA_mean_Hz_replicated;
+        mua_values = mua_values(~isnan(mua_values));
+        
+        if ~isempty(mua_values)
+            mean_mua(t) = mean(mua_values);
+            sem_mua(t) = std(mua_values) / sqrt(length(mua_values));
+        else
+            mean_mua(t) = NaN;
+            sem_mua(t) = NaN;
+        end
+    end
+    
+    valid_idx = ~isnan(mean_mua);
+    if sum(valid_idx) > 0
+        h_fill = fill([time_points(valid_idx); flipud(time_points(valid_idx))], ...
+             [mean_mua(valid_idx) + sem_mua(valid_idx); flipud(mean_mua(valid_idx) - sem_mua(valid_idx))], ...
+             condition_colors(c, :), 'EdgeColor', 'none', 'FaceAlpha', 0.2);
+        set(h_fill, 'HandleVisibility', 'off');
+        
+        plot(time_points(valid_idx), mean_mua(valid_idx), '-', ...
+             'Color', condition_colors(c, :), 'LineWidth', 2.5, 'DisplayName', condition);
+    end
+end
+
+h_inj = xline(0, 'k--', 'Injection', 'LineWidth', 2, 'LabelVerticalAlignment', 'bottom', 'HandleVisibility', 'off');
+
+xlabel('Time Relative to Injection (min)', 'FontSize', 12);
+ylabel('Mean MUA Rate (Hz)', 'FontSize', 12);
+title('Raw MUA Over Time by Condition (Mean ± SEM)', 'FontSize', 14);
+xlim([-100, 270])
+legend('Location', 'best', 'FontSize', 11);
+grid on;
+hold off;
+
+% --- PLOT 2: Individual Animals ---
+figure('Name', 'Raw MUA by Animal', 'Position', [150, 150, 1400, 800]);
+colors = lines(length(unique_animals));
+
+for c = 1:length(unique_conditions)
+    condition = unique_conditions{c};
+    subplot(1, length(unique_conditions), c);
+    hold on;
+    
+    for a = 1:length(unique_animals)
+        animal = unique_animals{a};
+        animal_condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition) & ...
+                                                strcmp(Final_GLM_Table.AnimalID, animal), :);
+        
+        if ~isempty(animal_condition_data)
+            time_points = unique(animal_condition_data.time_min);
+            mean_mua = zeros(length(time_points), 1);
+            
+            for t = 1:length(time_points)
+                time_data = animal_condition_data(animal_condition_data.time_min == time_points(t), :);
+                mua_values = time_data.MUA_mean_Hz_replicated;
+                mua_values = mua_values(~isnan(mua_values));
+                
+                if ~isempty(mua_values)
+                    mean_mua(t) = mean(mua_values);
+                else
+                    mean_mua(t) = NaN;
+                end
+            end
+            
+            valid_idx = ~isnan(mean_mua);
+            if sum(valid_idx) > 0
+                plot(time_points(valid_idx), mean_mua(valid_idx), '-', ...
+                     'Color', colors(a, :), 'LineWidth', 1.5, 'DisplayName', animal);
+            end
+        end
+    end
+    
+    xline(0, 'k--', 'Injection', 'LineWidth', 2, 'HandleVisibility', 'off');
+    xlabel('Time Relative to Injection (min)');
+    ylabel('Mean MUA Rate (Hz)');
+    xlim([-100, 270]);
+    title(['Condition: ', condition]);
+    legend('Location', 'best');
+    grid on;
+    hold off;
+end
+
+sgtitle('Raw MUA Over Time - Individual Animals');
+
+% --- PLOT 3: Pre vs Post Comparison ---
+figure('Name', 'Pre vs Post Injection MUA', 'Position', [200, 200, 800, 600]);
+
+all_mua = [];
+all_conditions = {};
+all_periods = {};
+
+for c = 1:length(unique_conditions)
+    condition = unique_conditions{c};
+    condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition), :);
+    
+    pre_data = condition_data(condition_data.time_min >= -30 & condition_data.time_min < 0, :);
+    pre_mua = pre_data.MUA_mean_Hz_replicated;
+    pre_mua = pre_mua(~isnan(pre_mua));
+    
+    post_data = condition_data(condition_data.time_min >= 0 & condition_data.time_min <= 60, :);
+    post_mua = post_data.MUA_mean_Hz_replicated;
+    post_mua = post_mua(~isnan(post_mua));
+    
+    all_mua = [all_mua; pre_mua; post_mua];
+    all_conditions = [all_conditions; repmat({condition}, length(pre_mua) + length(post_mua), 1)];
+    all_periods = [all_periods; repmat({'Pre'}, length(pre_mua), 1); repmat({'Post'}, length(post_mua), 1)];
+end
+
+if ~isempty(all_mua)
+    pre_post_table = table(all_conditions, all_periods, all_mua, ...
+        'VariableNames', {'Condition', 'Period', 'MUA_Hz'});
+    
+    boxplot(pre_post_table.MUA_Hz, {pre_post_table.Condition, pre_post_table.Period});
+    xlabel('Condition and Period');
+    ylabel('MUA Rate (Hz)');
+    title('Raw MUA: Pre (-30 to 0 min) vs Post (0 to 60 min)');
+    grid on;
+end
+
+% ----- Plot 4: Faceted Plot Split By Animal! See CNO effect overlayed ----
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% FACET PLOT: CNO vs VEHICLE FOR EACH ANIMAL
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+close all;
+load('Final_Table_for_GLM_cleanMUA.mat')
+
+disp('========================================');
+disp('GENERATING FACET PLOTS: CNO vs VEHICLE BY ANIMAL');
+disp('========================================');
+
+% Get unique animals
+unique_animals = unique(Final_GLM_Table.AnimalID);
+num_animals = length(unique_animals);
+
+% Create figure with subplots
+figure('Name', 'CNO vs Vehicle by Animal', 'Position', [100, 100, 1400, 900]);
+
+% Define colors
+cno_color = [0.2, 0.4, 0.8]; % Blue
+vehicle_color = [0.9, 0.3, 0.2]; % Red/Orange
+
+for a = 1:num_animals
+    animal = unique_animals{a};
+    
+    subplot(2, 2, a);
+    hold on;
+    
+    % --- Process CNO condition ---
+    cno_data = Final_GLM_Table(strcmp(Final_GLM_Table.AnimalID, animal) & ...
+                                strcmp(Final_GLM_Table.Condition, 'CNO'), :);
+    
+    if ~isempty(cno_data)
+        time_points_cno = unique(cno_data.time_min);
+        mean_mua_cno = zeros(length(time_points_cno), 1);
+        sem_mua_cno = zeros(length(time_points_cno), 1);
+        
+        for t = 1:length(time_points_cno)
+            time_data = cno_data(cno_data.time_min == time_points_cno(t), :);
+            mua_values = time_data.MUA_mean_Hz_replicated; 
+            mua_values = mua_values(~isnan(mua_values));
+            
+            if ~isempty(mua_values)
+                mean_mua_cno(t) = mean(mua_values);
+                sem_mua_cno(t) = std(mua_values) / sqrt(length(mua_values));
+            else
+                mean_mua_cno(t) = NaN;
+                sem_mua_cno(t) = NaN;
+            end
+        end
+        
+        % Plot CNO with shaded error
+        valid_idx = ~isnan(mean_mua_cno);
+        if sum(valid_idx) > 0
+            h_fill = fill([time_points_cno(valid_idx); flipud(time_points_cno(valid_idx))], ...
+                 [mean_mua_cno(valid_idx) + sem_mua_cno(valid_idx); ...
+                  flipud(mean_mua_cno(valid_idx) - sem_mua_cno(valid_idx))], ...
+                 cno_color, 'EdgeColor', 'none', 'FaceAlpha', 0.2);
+            set(h_fill, 'HandleVisibility', 'off');
+            
+            plot(time_points_cno(valid_idx), mean_mua_cno(valid_idx), '-', ...
+                 'Color', cno_color, 'LineWidth', 2, 'DisplayName', 'CNO');
+        end
+    end
+    
+    % --- Process Vehicle condition ---
+    vehicle_data = Final_GLM_Table(strcmp(Final_GLM_Table.AnimalID, animal) & ...
+                                    strcmp(Final_GLM_Table.Condition, 'Vehicle'), :);
+    
+    if ~isempty(vehicle_data)
+        time_points_veh = unique(vehicle_data.time_min);
+        mean_mua_veh = zeros(length(time_points_veh), 1);
+        sem_mua_veh = zeros(length(time_points_veh), 1);
+        
+        for t = 1:length(time_points_veh)
+            time_data = vehicle_data(vehicle_data.time_min == time_points_veh(t), :);
+            mua_values = time_data.MUA_mean_Hz_replicated;
+            mua_values = mua_values(~isnan(mua_values));
+            
+            if ~isempty(mua_values)
+                mean_mua_veh(t) = mean(mua_values);
+                sem_mua_veh(t) = std(mua_values) / sqrt(length(mua_values));
+            else
+                mean_mua_veh(t) = NaN;
+                sem_mua_veh(t) = NaN;
+            end
+        end
+        
+        % Plot Vehicle with shaded error
+        valid_idx = ~isnan(mean_mua_veh);
+        if sum(valid_idx) > 0
+            h_fill = fill([time_points_veh(valid_idx); flipud(time_points_veh(valid_idx))], ...
+                 [mean_mua_veh(valid_idx) + sem_mua_veh(valid_idx); ...
+                  flipud(mean_mua_veh(valid_idx) - sem_mua_veh(valid_idx))], ...
+                 vehicle_color, 'EdgeColor', 'none', 'FaceAlpha', 0.2);
+            set(h_fill, 'HandleVisibility', 'off');
+            
+            plot(time_points_veh(valid_idx), mean_mua_veh(valid_idx), '-', ...
+                 'Color', vehicle_color, 'LineWidth', 2, 'DisplayName', 'Vehicle');
+        end
+    end
+    
+    % --- Formatting ---
+    xline(0, 'k--', 'LineWidth', 1.5, 'HandleVisibility', 'off');
+    xlabel('Time Relative to Injection (min)', 'FontSize', 11);
+    ylabel('Mean MUA Rate (Hz)', 'FontSize', 11);
+    title(animal, 'FontSize', 12, 'FontWeight', 'bold');
+    xlim([-100, 270]);
+    legend('Location', 'northeast', 'FontSize', 10);
+    grid on;
+    hold off;
+end
+
+sgtitle('Raw MUA: CNO vs Vehicle by Animal (Mean ± SEM)', 'FontSize', 14, 'FontWeight', 'bold');
+disp('Animal Facet plot complete!');
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+%% Raw MUA grand mean CNO vs Vehicle Split by ALL Behavioural States
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+close all;
+load('Final_Table_for_GLM_cleanMUA.mat')
+
+disp('========================================');
+disp('GENERATING PLOTS BY BEHAVIORAL STATE');
+disp('========================================');
+
+% Get unique conditions and behavioral states
+unique_conditions = unique(Final_GLM_Table.Condition);
+unique_states = unique(Final_GLM_Table.BehaviouralState);
+
+% Remove empty/missing states if any
+unique_states = unique_states(~cellfun(@isempty, unique_states));
+
+disp(['Found ', num2str(length(unique_conditions)), ' conditions: ', strjoin(unique_conditions, ', ')]);
+disp(['Found ', num2str(length(unique_states)), ' behavioral states: ', strjoin(unique_states, ', ')]);
+
+% --- FACET PLOT: One subplot per behavioral state ---
+figure('Name', 'Raw MUA by Condition and Behavioral State', 'Position', [50, 50, 1800, 1000]);
+
+% Define colors for conditions
+cno_color = [0.2, 0.4, 0.8]; % Blue
+vehicle_color = [0.9, 0.3, 0.2]; % Red/Orange
+condition_colors = [cno_color; vehicle_color];
+
+% Determine subplot layout
+num_states = length(unique_states);
+if num_states <= 3
+    rows = 1;
+    cols = num_states;
+elseif num_states == 4
+    rows = 2;
+    cols = 2;
+else
+    rows = 2;
+    cols = 3;
+end
+
+for s = 1:num_states
+    state = unique_states{s};
+    
+    subplot(rows, cols, s);
+    hold on;
+    
+    for c = 1:length(unique_conditions)
+        condition = unique_conditions{c};
+        
+        % Filter data for this condition AND behavioral state
+        state_condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition) & ...
+                                                strcmp(Final_GLM_Table.BehaviouralState, state), :);
+        
+        if isempty(state_condition_data)
+            continue;
+        end
+        
+        time_points = unique(state_condition_data.time_min);
+        mean_mua = zeros(length(time_points), 1);
+        sem_mua = zeros(length(time_points), 1);
+        
+        for t = 1:length(time_points)
+            time_data = state_condition_data(state_condition_data.time_min == time_points(t), :);
+            mua_values = time_data.MUA_mean_Hz_replicated
+            mua_values = mua_values(~isnan(mua_values));
+            
+            if ~isempty(mua_values)
+                mean_mua(t) = mean(mua_values);
+                sem_mua(t) = std(mua_values) / sqrt(length(mua_values));
+            else
+                mean_mua(t) = NaN;
+                sem_mua(t) = NaN;
+            end
+        end
+        
+        % Plot with shaded error
+        valid_idx = ~isnan(mean_mua);
+        if sum(valid_idx) > 0
+            h_fill = fill([time_points(valid_idx); flipud(time_points(valid_idx))], ...
+                 [mean_mua(valid_idx) + sem_mua(valid_idx); flipud(mean_mua(valid_idx) - sem_mua(valid_idx))], ...
+                 condition_colors(c, :), 'EdgeColor', 'none', 'FaceAlpha', 0.2);
+            set(h_fill, 'HandleVisibility', 'off');
+            
+            plot(time_points(valid_idx), mean_mua(valid_idx), '-', ...
+                 'Color', condition_colors(c, :), 'LineWidth', 2.5, 'DisplayName', condition);
+        end
+    end
+    
+    % Formatting
+    xline(0, 'k--', 'LineWidth', 1.5, 'HandleVisibility', 'off');
+    xlabel('Time Relative to Injection (min)', 'FontSize', 11);
+    ylabel('Mean MUA Rate (Hz)', 'FontSize', 11);
+    title(['Behavioral State: ', state], 'FontSize', 12, 'FontWeight', 'bold');
+    xlim([-100, 270]);
+    legend('Location', 'northeast', 'FontSize', 10);
+    grid on;
+    hold off;
+end
+
+sgtitle('Raw MUA Over Time by Condition and Behavioral State (Mean ± SEM)', ...
+        'FontSize', 14, 'FontWeight', 'bold');
+
+disp('Behavioral state plots complete!');
+
+% Summary statistics by state ---
+fprintf('\n========================================\n');
+fprintf('SUMMARY: Sample sizes by State and Condition\n');
+fprintf('========================================\n');
+
+for s = 1:length(unique_states)
+    state = unique_states{s};
+    fprintf('\n%s:\n', state);
+    
+    for c = 1:length(unique_conditions)
+        condition = unique_conditions{c};
+        state_condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition) & ...
+                                                strcmp(Final_GLM_Table.BehaviouralState, state), :);
+        
+        n_total = height(state_condition_data);
+        n_valid = sum(~isnan(state_condition_data.MUA_mean_Hz_replicated));
+        
+        fprintf('  %s: %d total points, %d valid (%.1f%%)\n', ...
+                condition, n_total, n_valid, 100*n_valid/n_total);
+    end
+end
+fprintf('========================================\n');
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PLOT: RAW MUA BY CONDITION and BEHAVIOURAL STATE (QUIESCENCE vs MOVING)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+close all;
+load('Final_Table_for_GLM_cleanMUA.mat')
+
+disp('========================================');
+disp('GENERATING PLOTS: QUIESCENCE vs MOVING');
+disp('========================================');
+
+% Get unique conditions
+unique_conditions = unique(Final_GLM_Table.Condition);
+
+% Define behavioral categories
+quiescence_states = {'Still', 'StillActive', 'Mixed', 'Sleep'};
+moving_states = {'Moving'};
+
+% Create a new categorical variable for simplified behavioral state
+Final_GLM_Table.BehavioralCategory = cell(height(Final_GLM_Table), 1);
+
+for i = 1:height(Final_GLM_Table)
+    if ismember(Final_GLM_Table.BehaviouralState{i}, quiescence_states)
+        Final_GLM_Table.BehavioralCategory{i} = 'Quiescence';
+    elseif ismember(Final_GLM_Table.BehaviouralState{i}, moving_states)
+        Final_GLM_Table.BehavioralCategory{i} = 'Moving';
+    else
+        Final_GLM_Table.BehavioralCategory{i} = 'Other';
+    end
+end
+
+disp(['Quiescence states: ', strjoin(quiescence_states, ', ')]);
+disp(['Moving states: ', strjoin(moving_states, ', ')]);
+
+% --- TWO-PANEL PLOT: Quiescence and Moving ---
+figure('Name', 'Raw MUA by Condition: Quiescence vs Moving', 'Position', [100, 100, 1400, 600]);
+
+% Define colors for conditions
+cno_color = [0.2, 0.4, 0.8]; % Blue
+vehicle_color = [0.9, 0.3, 0.2]; % Red/Orange
+condition_colors = [cno_color; vehicle_color];
+
+behavioral_categories = {'Quiescence', 'Moving'};
+
+for panel = 1:2
+    category = behavioral_categories{panel};
+    
+    subplot(1, 2, panel);
+    hold on;
+    
+    for c = 1:length(unique_conditions)
+        condition = unique_conditions{c};
+        
+        % Filter data for this condition AND behavioral category
+        category_condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition) & ...
+                                                   strcmp(Final_GLM_Table.BehavioralCategory, category), :);
+        
+        if isempty(category_condition_data)
+            disp(['Warning: No data found for ', condition, ' in ', category]);
+            continue;
+        end
+        
+        time_points = unique(category_condition_data.time_min);
+        mean_mua = zeros(length(time_points), 1);
+        sem_mua = zeros(length(time_points), 1);
+        n_points = zeros(length(time_points), 1);
+        
+        for t = 1:length(time_points)
+            time_data = category_condition_data(category_condition_data.time_min == time_points(t), :);
+            mua_values = time_data.MUA_mean_Hz_replicated 
+            mua_values = mua_values(~isnan(mua_values));
+            
+            if ~isempty(mua_values)
+                mean_mua(t) = mean(mua_values);
+                sem_mua(t) = std(mua_values) / sqrt(length(mua_values));
+                n_points(t) = length(mua_values);
+            else
+                mean_mua(t) = NaN;
+                sem_mua(t) = NaN;
+                n_points(t) = 0;
+            end
+        end
+        
+        % Plot with shaded error
+        valid_idx = ~isnan(mean_mua);
+        if sum(valid_idx) > 0
+            h_fill = fill([time_points(valid_idx); flipud(time_points(valid_idx))], ...
+                 [mean_mua(valid_idx) + sem_mua(valid_idx); flipud(mean_mua(valid_idx) - sem_mua(valid_idx))], ...
+                 condition_colors(c, :), 'EdgeColor', 'none', 'FaceAlpha', 0.2);
+            set(h_fill, 'HandleVisibility', 'off');
+            
+            plot(time_points(valid_idx), mean_mua(valid_idx), '-', ...
+                 'Color', condition_colors(c, :), 'LineWidth', 1.5, 'DisplayName', condition);
+            
+            % Report sample size
+            fprintf('%s - %s: Mean N per time point = %.1f (range: %d-%d)\n', ...
+                    category, condition, mean(n_points(valid_idx)), ...
+                    min(n_points(valid_idx)), max(n_points(valid_idx)));
+        end
+    end
+    
+    % Formatting
+    xline(0, 'k--', 'LineWidth', 1, 'HandleVisibility', 'off');
+    xlabel('Time Relative to Injection (min)', 'FontSize', 12);
+    ylabel('Mean MUA Rate (Hz)', 'FontSize', 12);
+    title(category, 'FontSize', 14, 'FontWeight', 'bold');
+    xlim([-70, 240]);
+    ylim([-1, 350]);
+    legend('Location', 'northeast', 'FontSize', 11);
+    grid on;
+    hold off;
+end
+
+sgtitle('Raw MUA Over Time by Condition and Behavioral State (Mean ± SEM)', ...
+        'FontSize', 15, 'FontWeight', 'bold');
+
+%% --- SUMMARY STATISTICS ---
+fprintf('\n========================================\n');
+fprintf('SUMMARY: Sample sizes by Category and Condition\n');
+fprintf('========================================\n');
+
+for panel = 1:2
+    category = behavioral_categories{panel};
+    fprintf('\n%s:\n', category);
+    
+    for c = 1:length(unique_conditions)
+        condition = unique_conditions{c};
+        category_condition_data = Final_GLM_Table(strcmp(Final_GLM_Table.Condition, condition) & ...
+                                                   strcmp(Final_GLM_Table.BehavioralCategory, category), :);
+        
+        n_total = height(category_condition_data);
+        n_valid = sum(~isnan(category_condition_data.MUA_mean_Hz_replicated));
+        
+        if n_total > 0
+            fprintf('  %s: %d total points, %d valid (%.1f%%)\n', ...
+                    condition, n_total, n_valid, 100*n_valid/n_total);
+        else
+            fprintf('  %s: No data\n', condition);
+        end
+    end
+end
+
+% Breakdown by original behavioral state
+fprintf('\n========================================\n');
+fprintf('BREAKDOWN: Original States in Each Category\n');
+fprintf('========================================\n');
+
+fprintf('\nQuiescence includes:\n');
+for i = 1:length(quiescence_states)
+    state = quiescence_states{i};
+    n = sum(strcmp(Final_GLM_Table.BehaviouralState, state));
+    fprintf('  %s: %d points\n', state, n);
+end
+
+fprintf('\nMoving includes:\n');
+for i = 1:length(moving_states)
+    state = moving_states{i};
+    n = sum(strcmp(Final_GLM_Table.BehaviouralState, state));
+    fprintf('  %s: %d points\n', state, n);
+end
+
+fprintf('========================================\n');
+
+disp('Plot complete!');
