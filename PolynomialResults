@@ -1,0 +1,591 @@
+%% ================================================================================
+%% CONTINUOUS TREND ANALYSIS WITH LOOCV MODEL SELECTION & FDR CORRECTION
+%% ================================================================================
+% 
+% This script performs:
+% 1. Data loading and cleaning (removes outliers, contaminated sessions)
+% 2. Z-scoring to pre-injection baseline
+% 3. LOOCV-based polynomial model selection (linear/quadratic/cubic)
+% 4. FDR correction for multiple comparisons
+% 5. Visualisation of results with model fits
+
+% ================================================================================
+
+clc; clear all; close all;
+
+%% ================================================================================
+%% CONFIGURATION
+%% ================================================================================
+
+% Paths
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+output_path = fullfile(table_path, 'FinalAnalysis_Clean_Trend');
+viz_path = fullfile(output_path, 'TrendPlots');
+
+% Create directories
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+if ~exist(viz_path, 'dir'), mkdir(viz_path); end
+
+% Analysis parameters
+ALPHA = 0.05;  % Significance threshold
+TIME_LIMIT = 300;  % Maximum time post-injection (minutes) - all experiments had this much data 
+MOVING_AVERAGE_WINDOW = 30;  % Moving average window to show means (minutes)
+
+% Colors for plotting
+color_cno = [0.8500, 0.3250, 0.0980];  % Orange for CNO
+color_veh = [0, 0.4470, 0.7410];        % Blue for Vehicle
+
+% Metrics to analyse
+metrics_to_test = {
+    'MUA_Z_Baseline',                       'Multi-Unit Activity';
+    'Theta_Z_Baseline',                     'Theta Power';
+    'Ripple_Z_Baseline',                    'Ripple Power';
+    'theta_freq_weighted_mean_corrected',   'Theta Frequency (Hz)';
+    'ripple_events',                        'Ripple Events (per minute)';
+    'speed_z_px_s',                         'Animal Speed';
+};
+
+% Sessions to exclude (MUA artifacts found in pre-processing section) 
+contaminated_sessions = {
+    'mouseB6_CNO_Day2_Sleep_11_26_2012';
+    'mouseD12_050213_Day6_PBS';
+    'mouseD12_050913_Day7_CNO'
+};
+
+%% ================================================================================
+%% STEP 1: LOAD & CLEAN DATA
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 1: Loading and Cleaning Data\n');
+fprintf('================================================================\n\n');
+
+load(fullfile(table_path, 'Final_Table_for_GLM_cleanMUA_NewZ.mat'), 'Final_GLM_Table');
+fprintf(' Loaded data: %d rows\n', height(Final_GLM_Table));
+
+% Remove missing locations
+valid_mask = ~ismissing(Final_GLM_Table.Location);
+T = Final_GLM_Table(valid_mask, :);
+fprintf(' After removing missing locations: %d rows\n', height(T));
+
+% Limit to specified time window
+time_limit_mask = T.time_min <= TIME_LIMIT;
+T = T(time_limit_mask, :);
+fprintf(' Limited data to ≤%d minutes post-injection\n', TIME_LIMIT);
+
+fprintf('\n Final dataset:\n');
+fprintf('   - Rows: %d\n', height(T));
+fprintf('   - Sessions: %d\n', length(unique(T.SessionName)));
+fprintf('   - Animals: %d\n\n', length(unique(T.AnimalID)));
+
+T_clean = T;
+clear T Final_GLM_Table;
+
+%% ================================================================================
+%% STEP 2: Z-SCORE TO BASELINE
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 2: Z-Scoring to Pre-Injection Baseline\n');
+fprintf('================================================================\n\n');
+
+% Raw metric columns
+raw_mua_col = 'MUA_mean_Hz_replicated';
+raw_theta_col = 'theta_power_mean_corrected';
+raw_ripple_col = 'ripple_power_mean';
+
+% Initialise z-scored columns
+T_clean.MUA_Z_Baseline = NaN(height(T_clean), 1);
+T_clean.Theta_Z_Baseline = NaN(height(T_clean), 1);
+T_clean.Ripple_Z_Baseline = NaN(height(T_clean), 1);
+
+unique_sessions = unique(T_clean.SessionName);
+
+for s = 1:length(unique_sessions)
+    session = unique_sessions{s};
+    session_mask = strcmp(T_clean.SessionName, session);
+    pre_inj_mask = session_mask & T_clean.time_min < 0;
+    
+    % Z-score MUA, Theta Power, and Ripple Power
+    metrics = {raw_mua_col, raw_theta_col, raw_ripple_col};
+    z_cols = {'MUA_Z_Baseline', 'Theta_Z_Baseline', 'Ripple_Z_Baseline'};
+    
+    for m = 1:length(metrics)
+        pre_data = T_clean.(metrics{m})(pre_inj_mask);
+        if sum(pre_inj_mask) > 0
+            mean_val = mean(pre_data, 'omitnan');
+            std_val = std(pre_data, 'omitnan');
+            if std_val > 0
+                T_clean.(z_cols{m})(session_mask) = ...
+                    (T_clean.(metrics{m})(session_mask) - mean_val) / std_val;
+            else
+                T_clean.(z_cols{m})(session_mask) = 0;
+            end
+        end
+    end
+end
+
+fprintf(' Z-scoring complete (theta freq & ripple events kept as raw values)\n\n');
+
+%% ================================================================================
+%% STEP 3: DEFINE BEHAVIOURAL STATES
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 3: Defining Behavioural States\n');
+fprintf('================================================================\n\n');
+
+% Define state groupings
+active_states = {'Moving'};
+quiescent_states = {'Still', 'Sleep'};
+states_for_all_combined = {'Moving', 'Still', 'Sleep', 'StillActive'};
+
+% Create behavioral group variable
+T_clean.BehaviouralGroup = repmat(categorical(missing), height(T_clean), 1);
+
+for i = 1:height(T_clean)
+    state = T_clean.BehaviouralState{i};
+    if any(strcmp(state, active_states))
+        T_clean.BehaviouralGroup(i) = 'Active';
+    elseif any(strcmp(state, quiescent_states))
+        T_clean.BehaviouralGroup(i) = 'Quiescent';
+    end
+end
+
+% Define state masks
+all_states_mask = ismember(T_clean.BehaviouralState, states_for_all_combined);
+
+fprintf(' State distributions:\n');
+fprintf('   - Active (Moving): %d rows\n', sum(T_clean.BehaviouralGroup == 'Active'));
+fprintf('   - Quiescent (Still+Sleep): %d rows\n', sum(T_clean.BehaviouralGroup == 'Quiescent'));
+fprintf('   - All States: %d rows\n\n', sum(all_states_mask));
+
+% Define states for analysis
+states_to_test = {
+    all_states_mask,                      'All_States';
+    T_clean.BehaviouralGroup == 'Active', 'Active_Moving';
+    T_clean.BehaviouralGroup == 'Quiescent', 'Quiescent_Still_Sleep';
+};
+
+%% ================================================================================
+%% STEP 4: FIT MODELS WITH LOOCV SELECTION
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 4: Model Fitting & LOOCV Selection\n');
+fprintf('================================================================\n\n');
+
+trend_results = struct();
+
+for s = 1:size(states_to_test, 1)
+    state_mask = states_to_test{s, 1};
+    state_name = states_to_test{s, 2};
+    state_field = state_name;
+    
+    fprintf('Analyzing state: %s\n', state_name);
+    fprintf('----------------------------------------------------------\n');
+    
+    trend_results.(state_field) = struct();
+    all_metric_pvals = [];
+    all_metric_names = {};
+    
+    for m = 1:size(metrics_to_test, 1)
+        metric_var = metrics_to_test{m, 1};
+        metric_name = metrics_to_test{m, 2};
+        
+        fprintf('  Processing: %s\n', metric_name);
+        
+        % Get data subset
+        data_subset = T_clean(state_mask, :);
+        data_subset = data_subset(data_subset.time_min >= 0, :);
+        valid_data = ~isnan(data_subset.(metric_var));
+        data_subset = data_subset(valid_data, :);
+        
+        if height(data_subset) < 10
+            fprintf(' !!! Insufficient data, skipping...\n');
+            continue;
+        end
+        
+        % Prepare data
+        data_subset.Condition = reordercats(data_subset.Condition, {'Vehicle', 'CNO'});
+        data_subset.time_min_sq = data_subset.time_min .^ 2;
+        data_subset.time_min_cub = data_subset.time_min .^ 3;
+        
+        % Define model formulas
+        formula_lin = sprintf('%s ~ Condition * time_min + (1|AnimalID) + (1|SessionName)', metric_var);
+        formula_quad = sprintf('%s ~ Condition * (time_min + time_min_sq) + (1|AnimalID) + (1|SessionName)', metric_var);
+        formula_cubic = sprintf('%s ~ Condition * (time_min + time_min_sq + time_min_cub) + (1|AnimalID) + (1|SessionName)', metric_var);
+        
+        try
+            % Fit all three models
+            glme_lin = fitglme(data_subset, formula_lin, 'Distribution', 'Normal');
+            glme_quad = fitglme(data_subset, formula_quad, 'Distribution', 'Normal');
+            glme_cubic = fitglme(data_subset, formula_cubic, 'Distribution', 'Normal');
+            
+            % Get BIC
+            bic_lin = glme_lin.ModelCriterion.BIC;
+            bic_quad = glme_quad.ModelCriterion.BIC;
+            bic_cubic = glme_cubic.ModelCriterion.BIC;
+            
+            % Perform LOOCV
+            unique_sessions = unique(data_subset.SessionName);
+            n_sessions = length(unique_sessions);
+            
+            loocv_error_lin = zeros(n_sessions, 1);
+            loocv_error_quad = zeros(n_sessions, 1);
+            loocv_error_cubic = zeros(n_sessions, 1);
+            
+            for fold = 1:n_sessions
+                test_session = unique_sessions(fold);
+                train_mask = ~strcmp(data_subset.SessionName, test_session);
+                test_mask = strcmp(data_subset.SessionName, test_session);
+                
+                train_data = data_subset(train_mask, :);
+                test_data = data_subset(test_mask, :);
+                
+                try
+                    % Fit models on training data
+                    glme_lin_cv = fitglme(train_data, formula_lin, 'Distribution', 'Normal');
+                    glme_quad_cv = fitglme(train_data, formula_quad, 'Distribution', 'Normal');
+                    glme_cubic_cv = fitglme(train_data, formula_cubic, 'Distribution', 'Normal');
+                    
+                    % Predict on test data
+                    pred_lin = predict(glme_lin_cv, test_data, 'Conditional', false);
+                    pred_quad = predict(glme_quad_cv, test_data, 'Conditional', false);
+                    pred_cubic = predict(glme_cubic_cv, test_data, 'Conditional', false);
+                    
+                    % Calculate RMSE
+                    loocv_error_lin(fold) = sqrt(mean((test_data.(metric_var) - pred_lin).^2, 'omitnan'));
+                    loocv_error_quad(fold) = sqrt(mean((test_data.(metric_var) - pred_quad).^2, 'omitnan'));
+                    loocv_error_cubic(fold) = sqrt(mean((test_data.(metric_var) - pred_cubic).^2, 'omitnan'));
+                catch
+                    loocv_error_lin(fold) = NaN;
+                    loocv_error_quad(fold) = NaN;
+                    loocv_error_cubic(fold) = NaN;
+                end
+            end
+            
+            % Average LOOCV errors
+            mean_loocv_lin = mean(loocv_error_lin, 'omitnan');
+            mean_loocv_quad = mean(loocv_error_quad, 'omitnan');
+            mean_loocv_cubic = mean(loocv_error_cubic, 'omitnan');
+            
+            fprintf('    BIC: Lin=%.2f, Quad=%.2f, Cubic=%.2f\n', bic_lin, bic_quad, bic_cubic);
+            fprintf('    LOOCV: Lin=%.4f, Quad=%.4f, Cubic=%.4f\n', ...
+                mean_loocv_lin, mean_loocv_quad, mean_loocv_cubic);
+            
+            % Select best model (use LOOCV as primary criterion)
+            all_loocv = [mean_loocv_lin, mean_loocv_quad, mean_loocv_cubic];
+            all_bics = [bic_lin, bic_quad, bic_cubic];
+            all_models = {glme_lin, glme_quad, glme_cubic};
+            all_types = {'linear', 'quadratic', 'cubic'};
+            
+            [~, loocv_min_idx] = min(all_loocv);
+            [~, bic_min_idx] = min(all_bics);
+            
+            best_model = all_models{loocv_min_idx};
+            model_type = all_types{loocv_min_idx};
+            
+            if loocv_min_idx ~= bic_min_idx
+                fprintf('  BIC chose %s, but LOOCV chose %s (using LOOCV)\n', ...
+                    all_types{bic_min_idx}, model_type);
+            else
+                fprintf('  BIC and LOOCV agree: %s\n', model_type);
+            end
+            
+            % Store results
+            trend_results.(state_field).(metric_var).model = best_model;
+            trend_results.(state_field).(metric_var).data = data_subset;
+            trend_results.(state_field).(metric_var).model_type = model_type;
+            trend_results.(state_field).(metric_var).loocv_error = all_loocv(loocv_min_idx);
+            trend_results.(state_field).(metric_var).bic = all_bics(loocv_min_idx);
+            
+            % Get interaction terms
+            coef_table = best_model.Coefficients;
+            interaction_idx = contains(coef_table.Name, ':');
+            interaction_table = coef_table(interaction_idx, :);
+            
+            min_p_val = 1;
+            if ~isempty(interaction_table)
+                min_p_val = min(interaction_table.pValue);
+            end
+            
+            trend_results.(state_field).(metric_var).interaction_coeffs = interaction_table;
+            trend_results.(state_field).(metric_var).interaction_p_uncorrected = min_p_val;
+            
+            all_metric_pvals(end+1) = min_p_val;
+            all_metric_names{end+1} = metric_var;
+            
+        catch ME
+            fprintf('  Model fitting failed: %s\n', ME.message);
+            continue;
+        end
+    end
+    
+    % Apply FDR correction for this state
+    n_comparisons = length(all_metric_pvals);
+    if n_comparisons > 0
+        fprintf('\n  Applying FDR correction (%d comparisons):\n', n_comparisons);
+        
+        % Sort p-values
+        [p_sorted, sort_idx] = sort(all_metric_pvals);
+        
+        % Calculate FDR-adjusted p-values (Benjamini-Hochberg)
+        Q = ALPHA;
+        m = n_comparisons;
+        p_fdr = zeros(m, 1);
+        
+        for i = 1:m
+            p_fdr(i) = min(p_sorted(i) * m / i, 1);
+        end
+        
+        % Enforce monotonicity
+        for i = (m-1):-1:1
+            p_fdr(i) = min(p_fdr(i), p_fdr(i+1));
+        end
+        
+        % Reorder back
+        p_corrected = zeros(m, 1);
+        p_corrected(sort_idx) = p_fdr;
+        
+        % Display results
+        fprintf('  ----------------------------------------------------------\n');
+        fprintf('  %-25s | p(raw) | p(FDR) | Sig.\n', 'Metric');
+        fprintf('  ----------------------------------------------------------\n');
+        
+        for i = 1:n_comparisons
+            metric_var = all_metric_names{i};
+            is_sig = p_corrected(i) < ALPHA;
+            
+            trend_results.(state_field).(metric_var).interaction_p_corrected = p_corrected(i);
+            trend_results.(state_field).(metric_var).is_interaction_sig = is_sig;
+            
+            sig_str = is_sig ? sprintf('*** (p<%.2f)', ALPHA) : 'ns';
+            
+            fprintf('  %-25s | %.4f | %.4f | %s\n', ...
+                metric_var, all_metric_pvals(i), p_corrected(i), sig_str);
+        end
+        fprintf('  ----------------------------------------------------------\n');
+    end
+    
+    fprintf('\n');
+end
+
+% Save results
+save(fullfile(output_path, 'TrendAnalysis_Results.mat'), 'trend_results');
+fprintf('Results saved to: TrendAnalysis_Results.mat\n\n');
+
+%% ================================================================================
+%% STEP 5: CALCULATE Y-AXIS LIMITS
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 5: Calculating Y-Axis Limits\n');
+fprintf('================================================================\n\n');
+
+metric_ylims = containers.Map();
+post_inj_data = T_clean(T_clean.time_min >= 0, :);
+
+for m = 1:size(metrics_to_test, 1)
+    metric_var = metrics_to_test{m, 1};
+    metric_data = post_inj_data.(metric_var);
+    metric_data = metric_data(~isnan(metric_data) & ~isinf(metric_data));
+    
+    p_low = prctile(metric_data, 1);
+    p_high = prctile(metric_data, 99);
+    data_range = p_high - p_low;
+    padding = data_range * 0.1;
+    
+    metric_ylims(metric_var) = [p_low - padding, p_high + padding];
+end
+
+fprintf(' Y-axis limits calculated\n\n');
+
+%% ================================================================================
+%% STEP 6: VISUALIZATION - COMPOSITE FIGURE
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 6: Creating Composite Figure\n');
+fprintf('================================================================\n\n');
+
+fig_composite = figure('Position', [100, 100, 1800, 800], 'Color', 'w');
+
+% Helper function for moving average
+calculate_moving_average = @(data_time, data_vals, window_size) ...
+    local_moving_average(data_time, data_vals, window_size);
+
+%% ROW 1: QUIESCENCE
+
+% Panel A: Ripple Power (Quiescence)
+subplot(2, 4, 1);
+plot_metric_panel(T_clean, trend_results, 'Quiescent_Still_Sleep', ...
+    'Ripple_Z_Baseline', 'Quiescence: A. Ripple Power', 'Z-Score', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+
+% Panel B: Ripple Events (Quiescence)
+subplot(2, 4, 2);
+plot_metric_panel(T_clean, trend_results, 'Quiescent_Still_Sleep', ...
+    'ripple_events', 'Quiescence: B. Ripple Events', 'Events/min', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+
+% Panel C: MUA (Quiescence)
+subplot(2, 4, 3);
+plot_metric_panel(T_clean, trend_results, 'Quiescent_Still_Sleep', ...
+    'MUA_Z_Baseline', 'Quiescence: C. MUA', 'Z-Score', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+
+% Panel D: Speed (Quiescence)
+subplot(2, 4, 4);
+plot_metric_panel(T_clean, trend_results, 'Quiescent_Still_Sleep', ...
+    'speed_z_px_s', 'Quiescence: D. Speed', 'Speed (Z-Score)', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+legend('Location', 'best', 'FontSize', 8);
+
+%% ROW 2: MOVEMENT
+
+% Panel E: Theta Power (Movement)
+subplot(2, 4, 5);
+plot_metric_panel(T_clean, trend_results, 'Active_Moving', ...
+    'Theta_Z_Baseline', 'Movement: E. Theta Power', 'Z-Score', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+xlabel('Time from Injection (min)', 'FontSize', 10);
+
+% Panel F: Theta Frequency (Movement)
+subplot(2, 4, 6);
+plot_metric_panel(T_clean, trend_results, 'Active_Moving', ...
+    'theta_freq_weighted_mean_corrected', 'Movement: F. Theta Frequency', 'Frequency (Hz)', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+xlabel('Time from Injection (min)', 'FontSize', 10);
+
+% Panel G: MUA (Movement)
+subplot(2, 4, 7);
+plot_metric_panel(T_clean, trend_results, 'Active_Moving', ...
+    'MUA_Z_Baseline', 'Movement: G. MUA', 'Z-Score', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+xlabel('Time from Injection (min)', 'FontSize', 10);
+
+% Panel H: Speed (All States)
+subplot(2, 4, 8);
+plot_metric_panel(T_clean, trend_results, 'All_States', ...
+    'speed_z_px_s', 'All States: H. Speed', 'Speed (Z-Score)', ...
+    metric_ylims, color_cno, color_veh, MOVING_AVERAGE_WINDOW);
+xlabel('Time from Injection (min)', 'FontSize', 10);
+legend('Location', 'best', 'FontSize', 8);
+
+% Add main title
+sgtitle('Continuous State-Dependent Neural Dissociations', ...
+    'FontSize', 16, 'FontWeight', 'bold');
+
+% Save figure
+saveas(fig_composite, fullfile(viz_path, 'Composite_MainFindings_LOOCV.png'));
+saveas(fig_composite, fullfile(viz_path, 'Composite_MainFindings_LOOCV.jpg'));
+
+fprintf(' Saved: Composite_MainFindings_LOOCV.png/jpg\n\n');
+
+fprintf('================================================================\n');
+fprintf('ANALYSIS COMPLETE!\n');
+fprintf('================================================================\n');
+
+%% ================================================================================
+%% HELPER FUNCTIONS
+%% ================================================================================
+
+function [ma_time, ma_vals] = local_moving_average(data_time, data_vals, window_size)
+    % Calculate moving average with specified window
+    data_sorted = sortrows([data_time, data_vals], 1);
+    ma_time = [];
+    ma_vals = [];
+    
+    for t = 0:10:300
+        window_mask = data_sorted(:,1) >= t & data_sorted(:,1) < (t + window_size);
+        if sum(window_mask) >= 5
+            ma_time(end+1) = t + window_size/2;
+            ma_vals(end+1) = mean(data_sorted(window_mask, 2), 'omitnan');
+        end
+    end
+end
+
+function plot_metric_panel(T_clean, trend_results, state_field, metric_var, ...
+    title_str, ylabel_str, metric_ylims, color_cno, color_veh, window_size)
+    % Plot a single metric panel with scatter, moving average, and model fit
+    
+    hold on;
+    
+    % Determine state mask
+    if strcmp(state_field, 'All_States')
+        states_for_all = {'Moving', 'Still', 'Sleep', 'StillActive'};
+        state_mask = ismember(T_clean.BehaviouralState, states_for_all);
+    elseif strcmp(state_field, 'Active_Moving')
+        state_mask = T_clean.BehaviouralGroup == 'Active';
+    else  % Quiescent_Still_Sleep
+        state_mask = T_clean.BehaviouralGroup == 'Quiescent';
+    end
+    
+    % Get data subset
+    data_subset = T_clean(state_mask, :);
+    data_subset = data_subset(data_subset.time_min >= 0, :);
+    valid_data = ~isnan(data_subset.(metric_var));
+    data_subset = data_subset(valid_data, :);
+    
+    % Split by condition
+    cno_data = data_subset(data_subset.Condition == 'CNO', :);
+    veh_data = data_subset(data_subset.Condition == 'Vehicle', :);
+    
+    % Scatter plots (semi-transparent)
+    scatter(cno_data.time_min, cno_data.(metric_var), 10, color_cno, ...
+        'filled', 'MarkerFaceAlpha', 0.2, 'HandleVisibility', 'off');
+    scatter(veh_data.time_min, veh_data.(metric_var), 10, color_veh, ...
+        'filled', 'MarkerFaceAlpha', 0.2, 'HandleVisibility', 'off');
+    
+    % Moving averages (dotted lines)
+    [veh_ma_time, veh_ma_vals] = local_moving_average(veh_data.time_min, veh_data.(metric_var), window_size);
+    [cno_ma_time, cno_ma_vals] = local_moving_average(cno_data.time_min, cno_data.(metric_var), window_size);
+    
+    plot(veh_ma_time, veh_ma_vals, ':', 'Color', color_veh, 'LineWidth', 3, ...
+        'DisplayName', 'Vehicle (mean)');
+    plot(cno_ma_time, cno_ma_vals, ':', 'Color', color_cno, 'LineWidth', 3, ...
+        'DisplayName', 'CNO (mean)');
+    
+    % Model predictions (solid lines with confidence intervals)
+    if isfield(trend_results, state_field) && isfield(trend_results.(state_field), metric_var)
+        glme = trend_results.(state_field).(metric_var).model;
+        
+        time_pred = linspace(0, max(data_subset.time_min), 500)';
+        
+        % Prepare prediction table
+        pred_table_veh = table();
+        pred_table_veh.time_min = time_pred;
+        pred_table_veh.time_min_sq = time_pred.^2;
+        pred_table_veh.time_min_cub = time_pred.^3;
+        pred_table_veh.Condition = repmat(categorical({'Vehicle'}, {'Vehicle', 'CNO'}), length(time_pred), 1);
+        pred_table_veh.AnimalID = repmat(data_subset.AnimalID(1), length(time_pred), 1);
+        pred_table_veh.SessionName = repmat(data_subset.SessionName(1), length(time_pred), 1);
+        
+        pred_table_cno = pred_table_veh;
+        pred_table_cno.Condition = repmat(categorical({'CNO'}, {'Vehicle', 'CNO'}), length(time_pred), 1);
+        
+        % Predictions
+        [pred_veh, pred_veh_ci] = predict(glme, pred_table_veh, 'Conditional', false, 'Alpha', 0.05);
+        [pred_cno, pred_cno_ci] = predict(glme, pred_table_cno, 'Conditional', false, 'Alpha', 0.05);
+        
+        % Plot confidence intervals (shaded)
+        fill([time_pred; flipud(time_pred)], [pred_veh_ci(:,1); flipud(pred_veh_ci(:,2))], ...
+            color_veh, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+        fill([time_pred; flipud(time_pred)], [pred_cno_ci(:,1); flipud(pred_cno_ci(:,2))], ...
+            color_cno, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+        
+        % Plot model predictions
+        plot(time_pred, pred_veh, '-', 'Color', color_veh, 'LineWidth', 2, ...
+            'DisplayName', 'Vehicle (model)');
+        plot(time_pred, pred_cno, '-', 'Color', color_cno, 'LineWidth', 2, ...
+            'DisplayName', 'CNO (model)');
+    end
+    
+    % Formatting
+    title(title_str, 'FontSize', 11, 'FontWeight', 'bold');
+    ylabel(ylabel_str, 'FontSize', 10);
+    
+    if isKey(metric_ylims, metric_var)
+        ylim(metric_ylims(metric_var));
+    end
+    
+    xlim([0, 300]);
+    grid on;
+    box on;
+    hold off;
+end
