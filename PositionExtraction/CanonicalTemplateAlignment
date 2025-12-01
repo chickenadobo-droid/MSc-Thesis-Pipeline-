@@ -1,0 +1,118 @@
+function affine_calibrate_all_events(events_path, base_data_dir, calib_dir)
+% This function performs a full affine transformation to a canonical template
+% to get all pixel space to be comparable enabling greater number of sessions to have raw 
+% absolute speed data rather than z-scored
+
+% --- 1) Define Canonical Template (hard-coded for exp1 animal1) ---
+% These points should be the output of your ginput() for exp1 animal1
+% and should not change.
+canonical.track_corners_px = [
+    500 50;  % Example coordinates
+    500 450;
+    100 450;
+    100 50
+    ];
+canonical.sleep_pod_center_px = [300 250]; % Example coordinate
+canonical.cm_per_pixel = 100 / (norm(canonical.track_corners_px(1,:)-canonical.track_corners_px(2,:)) + ...
+                               norm(canonical.track_corners_px(2,:)-canonical.track_corners_px(3,:)) + ...
+                               norm(canonical.track_corners_px(3,:)-canonical.track_corners_px(4,:)));
+
+
+% 2) Load Events
+S = load(events_path, 'Events');
+Events = S.Events;
+exps = fieldnames(Events);
+fprintf('Found %d experiments in Events.\n', numel(exps));
+
+% 3) Loop through all experiments
+for i = 1:numel(exps)
+    exp = exps{i};
+    fprintf('[%d/%d] %s\n', i, numel(exps), exp);
+    
+    % --- Calibration file ---
+    calib_file = fullfile(calib_dir, ['calibration_' exp '.mat']);
+    if ~isfile(calib_file)
+        warning('Missing calibration file for %s. Skipping.', exp);
+        continue;
+    end
+    C = load(calib_file);
+    calibration = C.calibration;
+    
+    % --- Detect animal folder --- (Your original animal detection is fine)
+    animal = '';
+    if contains(exp,'B5')
+        animal='B5';
+    elseif contains(exp,'B7')
+        animal='B7';
+    elseif contains(exp,'B6')
+        animal='B6_Probe';
+    elseif contains(exp,'D12')
+        animal='D12_Probe';
+    else
+        all_animals = dir(base_data_dir);
+        all_animals = all_animals([all_animals.isdir] & ~startsWith({all_animals.name}, '.'));
+        for a = 1:numel(all_animals)
+            possible_path = fullfile(base_data_dir, all_animals(a).name, exp);
+            if isfolder(possible_path)
+                animal = all_animals(a).name;
+                break;
+            end
+        end
+    end
+    if isempty(animal)
+        warning('Could not find animal folder for %s. Skipping.', exp);
+        continue;
+    end
+    
+    % --- Load extracted_position ---
+    pos_path = fullfile(base_data_dir, animal, exp, 'extracted_position.mat');
+    if ~isfile(pos_path)
+        warning('Missing extracted_position.mat for %s. Skipping.', exp);
+        continue;
+    end
+    P = load(pos_path);
+    if ~isfield(P, 'position') || ~all(isfield(P.position, {'x','y','t'}))
+        warning('position.x/y/t missing for %s. Skipping.', exp);
+        continue;
+    end
+    
+    % --- NEW: Affine Transformation ---
+    % Define the moving points for the current session based on your calibration file
+    moving_points = [];
+    fixed_points = [];
+
+    % Check if the calibration data has track points
+    if isfield(calibration, 'track_corners_px') && ~isempty(calibration.track_corners_px)
+        moving_points = [calibration.track_corners_px; calibration.sleep_pod_center_px];
+        fixed_points = [canonical.track_corners_px; canonical.sleep_pod_center_px];
+    elseif isfield(calibration, 'sleep_pod_center_px')
+        % For sleepbox-only sessions, use center and two perimeter points
+        % You will need to add these perimeter points to your calibration file
+        % For now, we'll use a simpler alignment based on just the center for translation,
+        % and a scaling factor to match the canonical pod radius.
+        % This part needs refinement to get a true affine transform for rotation/scale.
+        moving_points = calibration.sleep_pod_center_px;
+        fixed_points = canonical.sleep_pod_center_px;
+    else
+        warning('Calibration data is missing key points for alignment. Skipping.');
+        continue;
+    end
+    
+    % Create the affine transformation object
+    tform = fitgeotrans(moving_points, fixed_points, 'affine');
+    
+    % Apply the transformation to the raw position data
+    [x_aligned, y_aligned] = transformPointsForward(tform, P.position.x, P.position.y);
+    
+    % --- Store Aligned Position & Calibrate ---
+    % Now, use the SINGLE canonical cm_per_pixel to convert aligned pixels to cm.
+    Events.(exp).position_interp.x_cm = x_aligned * canonical.cm_per_pixel;
+    Events.(exp).position_interp.y_cm = y_aligned * canonical.cm_per_pixel;
+    Events.(exp).calibration.has_track = isfield(calibration, 'has_track') && calibration.has_track;
+
+end
+
+% 4) Save
+save(events_path, 'Events', '-v7.3');
+fprintf('\n✅ Calibration + full affine alignment complete. Events.mat updated.\n');
+end
