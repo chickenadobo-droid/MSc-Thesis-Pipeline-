@@ -269,4 +269,125 @@ if totalErrors > 0
     end
 end
 
-fprintf('All done!\n');
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+function batch_calibrate_from_events(events_path, base_data_dir, calib_dir, varargin)
+% Batch-calibrate all experiments in Events.mat by reading flags from position_data.mat:
+%   number_of_tracks        -> 1 means track present; 0 means no track
+%   number_of_sleep_boxes   -> typically 1
+%
+% Name-Value (optional):
+%   'DefaultTrackLengthCM', 100   (used when HasTrack=true)
+%   'DefaultPodDiameterCM',  NaN  (only used if HasTrack=false AND you know pod diameter)
+
+%% run this 
+% events_path   = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\Events.mat';
+% base_data_dir = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\DansDrive_NoRaw';
+% calib_dir     = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\CalibrationFiles';
+
+% batch_calibrate_from_events(events_path, base_data_dir, calib_dir);
+
+
+p = inputParser;
+p.addRequired('events_path', @ischar);
+p.addRequired('base_data_dir', @ischar);
+p.addRequired('calib_dir', @ischar);
+p.addParameter('DefaultTrackLengthCM', 100, @(x) isscalar(x) && x>0);
+p.addParameter('DefaultPodDiameterCM', NaN, @(x) isscalar(x) || isnan(x));
+p.parse(events_path, base_data_dir, calib_dir, varargin{:});
+opts = p.Results;
+
+S = load(events_path, 'Events'); 
+exps = fieldnames(S.Events);
+fprintf('Found %d experiments in Events.\n', numel(exps));
+
+for i = 1:numel(exps)
+    exp = exps{i};
+    fprintf('\n[%d/%d] %s\n', i, numel(exps), exp);
+
+    % map to animal folder
+    animal = infer_animal_folder(exp);
+    if isempty(animal)
+        warning('  ? Could not infer animal folder for %s. Skipping.', exp);
+        continue;
+    end
+
+    pos_path = fullfile(base_data_dir, animal, exp, 'position_data.mat');
+    if ~isfile(pos_path)
+        warning('  ! Missing position_data.mat for %s. Skipping.', exp);
+        continue;
+    end
+
+    L = load(pos_path);  % load all; we'll look for positions & flags
+
+    % required positions
+    if ~isfield(L,'positions') || ~all(isfield(L.positions, {'x','y'}))
+        warning('  ! positions.x/y missing for %s. Skipping.', exp);
+        continue;
+    end
+
+    % detect flags from file
+    [hasTrack, hasPod] = detect_flags(L);
+    if ~hasPod && ~hasTrack
+        warning('  ! Neither track nor sleep box flagged. Skipping.');
+        continue;
+    end
+
+    % run the appropriate calibration
+    if hasTrack
+        disp('  -> TRACK+POD: Click START, END, then POD CENTRE');
+        calibrate_experiment_with_pod(L.positions, exp, ...
+            'HasTrack', true, ...
+            'TrackLengthCM', opts.DefaultTrackLengthCM, ...
+            'SaveDir', calib_dir);
+    else
+        disp('  -> POD-ONLY: Click POD CENTRE');
+        if ~isnan(opts.DefaultPodDiameterCM)
+            calibrate_experiment_with_pod(L.positions, exp, ...
+                'HasTrack', false, ...
+                'PodDiameterCM', opts.DefaultPodDiameterCM, ...
+                'SaveDir', calib_dir);
+        else
+            calibrate_experiment_with_pod(L.positions, exp, ...
+                'HasTrack', false, ...
+                'SaveDir', calib_dir);
+        end
+    end
+end
+
+fprintf('\nBatch calibration finished. Calibrations saved in: %s\n', calib_dir);
+end
+
+% ------- helpers -------
+function [hasTrack, hasPod] = detect_flags(L)
+hasTrack = false; hasPod = true; % default assume pod present
+% direct vars
+if isfield(L, 'number_of_tracks')
+    hasTrack = (L.number_of_tracks >= 1);
+end
+if isfield(L, 'number_of_sleep_boxes')
+    hasPod = (L.number_of_sleep_boxes >= 1);
+end
+% sometimes flags live inside 'position' struct from PRE step:
+if isfield(L, 'position') && isstruct(L.position)
+    if ~hasTrack && isfield(L.position,'linear')
+        hasTrack = ~isempty(L.position.linear);
+    end
+    if ~hasPod && isfield(L.position,'sleep') && isfield(L.position.sleep,'t')
+        hasPod = ~isempty(L.position.sleep.t);
+    end
+end
+end
+
+function animal = infer_animal_folder(exp_name)
+if contains(exp_name,'B5')
+    animal='B5';
+elseif contains(exp_name,'B7')
+    animal='B7';
+elseif contains(exp_name,'B6')
+    animal='B6_Probe';
+elseif contains(exp_name,'D12')
+    animal='D12_Probe';
+else
+    animal='';
+end
+end
