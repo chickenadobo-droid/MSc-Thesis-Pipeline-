@@ -1,4 +1,4 @@
-### Electrophysiological and Behavioural Annalysis Pipeline 
+### Electrophysiological and Behavioural Analysis Pipeline 
 
 OVERVIEW
 
