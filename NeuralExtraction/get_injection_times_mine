@@ -1,0 +1,69 @@
+%% INJECTION TIMES CONFIGURATION
+% Add all your session injection times here
+%
+% Format: injection_times('SessionName') = time_in_seconds;
+%
+% This file should be updated with all session injection times
+
+function injection_times = get_injection_times_mine()
+% GET_INJECTION_TIMES Returns injection times for all sessions
+%
+% All injection times are in seconds from the recording start of the
+% running clock - these are therefore continuous timestamps, not related to
+% the length of the individual session.
+%
+% Returns: containers.Map with session names as keys and injection times as values
+
+    injection_times = containers.Map();
+    
+    %% B5 - CNO Sessions (with mouseB5_ prefix)
+    injection_times('mouseB5_CNO_091412_day1') = 620618.9;
+    injection_times('mouseB5_CNO_091612_day2') = 782371.9;
+    injection_times('mouseB5_CNO_091812_day3') = 954494.9;
+    injection_times('mouseB5_CNO_092012_sleepbox_day4') = 1136729;
+    injection_times('mouseB5_CNO_092212_sleepbox_day5') = 1304012;
+    injection_times('mouseB5_CNO_100512_day6') = 254784.6;
+    
+    %% B5 - VEHICLE Sessions (with mouseB5_ prefix)
+    injection_times('mouseB5_VEHICLE_091512_day1') = 697586.6;
+    injection_times('mouseB5_VEHICLE_091712_day2') = 870928;
+    injection_times('mouseB5_VEHICLE_091912_day3') = 1041060;
+    injection_times('mouseB5_VEHICLE_092112_sleepbox_day4') = 1214598;
+    injection_times('mouseB5_VEHICLE_100412_day5') = 167283.5;
+    
+    %% B6_Probe - CNO Sessions (with mouseB6_ prefix)
+    injection_times('mouseB6_CNO_day5_sleep_12_11_12') = 329057;
+    injection_times('mouseB6_CNO_Day1_Sleep_11_20_2012') = 94561.42;
+    injection_times('mouseB6_CNO_Day2_Sleep_11_26_2012') = 614247.3;
+    injection_times('mouseB6_CNO_Day3_run_11_30_12_B6') = 16488.29;
+    injection_times('mouseB6_CNO_Day4_run_12_03_12') = 18076.34;
+    
+    %% B6_Probe - PBS Sessions (with mouseB6_ prefix)
+    injection_times('mouseB6_PBS_day5_sleep_12_10_12') = 218247.3;
+    injection_times('mouseB6_PBS_day6_sleep_12_12_12') = 55646.19;
+    injection_times('mouseB6_PBS_Day1_Sleep_11_21_2012') = 179678.6;
+    injection_times('mouseB6_PBS_Day2_Sleep_11_28_2012_B6') = 786878.6;
+    injection_times('mouseB6_PBS_Day4_run_12_02_12_B6') = 188934.7;
+    
+    %% B7 - CNO Sessions (with mouseB7_ prefix)
+    injection_times('mouseB7_CNO_082712_day1') = 362154.3;
+    injection_times('mouseB7_CNO_082912_day2') = 93402.11;
+    injection_times('mouseB7_CNO_090812_day3') = 103239.5;
+    injection_times('mouseB7_CNO_091112_day4') = 352136.4;
+    
+    %% B7 - VEHICLE Sessions (with mouseB7_ prefix)
+    injection_times('mouseB7_VEHICLE_082812_day1') = 6425.048;
+    injection_times('mouseB7_VEHICLE_091012_day2') = 277282.1;
+    
+    %% D12_Probe - PBS Sessions (with mouseD12_ prefix)
+    injection_times('mouseD12_042213_Day1_PBS') = 11323044;
+    injection_times('mouseD12_042413_Day3_PBS') = 11481038;
+    injection_times('mouseD12_050213_Day6_PBS') = 12176695;
+    
+    %% D12_Probe - CNO Sessions (with mouseD12_ prefix)
+    injection_times('mouseD12_042313_Day2_CNO') = 11408403;
+    injection_times('mouseD12_042513_Day4_CNO') = 11577144;
+    injection_times('mouseD12_043013_Day5_CNO') = 12008867;
+    injection_times('mouseD12_050913_Day7_CNO') = 549332.6;
+    
+end
