@@ -1,12 +1,32 @@
 %% ================================================================================
-%% TIME WINDOW ANALYSIS GLM
+%% TIME WINDOW ANALYSIS BASED ON CNO PHARMACOKINETICS
 %% ================================================================================
 
 fprintf('\n================================================================\n');
-fprintf('TIME WINDOW ANALYSIS: CNO Pharmacokinetic Phases\n');
+fprintf('TIME WINDOW ANALYSIs\n');
 fprintf('================================================================\n\n');
 
 clc; clear all; close all;
+
+%% Helper function to sanitise window names for field names
+function field_name = sanitize_window_name(window_name)
+    % Convert window name to valid MATLAB field name
+    field_name = window_name;
+    
+    % Replace spaces with underscores
+    field_name = strrep(field_name, ' ', '_');
+    
+    % Replace hyphens with 'to'
+    field_name = strrep(field_name, '-', 'to');
+    
+    % Remove 'to' text (from "181 to 360")
+    field_name = strrep(field_name, '_to_', 'to');
+    
+    % If starts with number, add 'W' prefix (Window)
+    if ~isempty(field_name) && isstrprop(field_name(1), 'digit')
+        field_name = ['W' field_name];
+    end
+end
 
 %% ================================================================================
 %% STEP 1: LOAD & CLEAN DATA
@@ -25,25 +45,6 @@ fprintf('  Loaded: Final_Table_for_GLM_cleanMUA_NewZ.mat (%d rows)\n', height(Fi
 valid_mask = ~ismissing(Final_GLM_Table.Location);
 T = Final_GLM_Table(valid_mask, :);
 fprintf('  Rows after removing missing locations: %d\n', height(T));
-
-% % Remove Extreme MUA Sessions
-% unique_sessions_all = unique(T.SessionName);
-% session_stats = table();
-% for s = 1:length(unique_sessions_all)
-%     session = unique_sessions_all{s};
-%     session_mask = strcmp(T.SessionName, session);
-%     post_inj_mask = session_mask & T.time_min >= 0;
-%     mua_post = T.MUA_mean_Hz_replicated(post_inj_mask);
-%     session_stats = [session_stats; table({char(session)}, mean(mua_post, 'omitnan'), ...
-%         'VariableNames', {'SessionName', 'MUA_Post_Mean'})];
-% end
-% median_mua = median(session_stats.MUA_Post_Mean);
-% mad_val = median(abs(session_stats.MUA_Post_Mean - median_mua));
-% outlier_mask = abs(session_stats.MUA_Post_Mean - median_mua) > 2.5*mad_val;
-% outlier_sessions = session_stats.SessionName(outlier_mask);
-% fprintf('  Flagging %d extreme MUA sessions for removal.\n', sum(outlier_mask));
-% keep_mask = ~ismember(T.SessionName, outlier_sessions);
-% T = T(keep_mask, :);
 
 % Remove Contaminated Sessions
 contaminated_sessions = {
@@ -158,14 +159,12 @@ metrics_to_test = {
     'speed_z_px_s', 'Animal Speed'; 
 };
 
-% Define time windows based on CNO pharmacokinetics literature
 time_windows = {
-    'Pre-Injection',       -100, 0;     % Pre-injection baseline
-    '0-1hr',                 0, 60;     % Contains max potency and rise up quick pharmacological action
-    '1-2hrs',              60, 120;     % Duration of stability
-    '2-5hrs',             120, 360;     % Clearance/washout (180min clearance studies)
+    'Pre-Injection',       -100, 0;      % Pre-injection baseline (REFERENCE)
+    '0-1hr',        0, 60;     % Acute phase
+    '1-2hr',       60, 180;    % Intermediate phase  
+    '2-5hr',      180, 360;    % Late phase
 };
-
 
 % Define behavioural states to analyse
 states_to_test = {
@@ -254,12 +253,12 @@ for s = 1:size(states_to_test, 1)
             continue;
         end
         
-        % CRITICAL FIX: Remove "Unknown" from categories AND get actual existing categories
+        % Remove "Unknown" from categories AND get actual existing categories
         data_subset.TimeWindow = removecats(data_subset.TimeWindow, 'Unknown');
         existing_categories = categories(data_subset.TimeWindow);
         
         % Create desired order based on time_windows definition
-        desired_order = time_windows(:, 1);  % Get all window names
+        desired_order = time_windows(:, 1);
         
         % Build valid order: only categories that exist, in desired order
         valid_order = {};
@@ -274,7 +273,7 @@ for s = 1:size(states_to_test, 1)
             continue;
         end
         
-        % Set factor ordering: Baseline first, Vehicle as reference
+        % **CHANGED: REFERENCE CODING - Pre first, Vehicle as reference**
         data_subset.TimeWindow = reordercats(data_subset.TimeWindow, valid_order);
         data_subset.Condition = reordercats(data_subset.Condition, {'Vehicle', 'CNO'});
         
@@ -286,12 +285,12 @@ for s = 1:size(states_to_test, 1)
             fprintf('      %s: n=%d\n', window_name, n_samples);
         end
 
-        %% Fit mixed-effects model
-        formula = sprintf('%s ~ Condition * Time Window + (1|AnimalID) + (1|SessionName)', metric_var);
+        %% Fit mixed-effects model with REFERENCE coding
+        formula = sprintf('%s ~ Condition * TimeWindow + (1|AnimalID) + (1|SessionName)', metric_var);
         
         try
             glme = fitglme(data_subset, formula, 'Distribution', 'Normal', ...
-                'DummyVarCoding', 'reference');
+                'DummyVarCoding', 'reference');  % **CHANGED: reference coding**
             
             fprintf('    Model fit successful\n');
             
@@ -367,15 +366,99 @@ for s = 1:size(states_to_test, 1)
 end
 
 %% ================================================================================
-%% STEP 4: POST-HOC CONTRASTS WITH BONFERRONI CORRECTION
+%% STEP 4: POST-HOC CONTRASTS WITH BONFERRONI-HOLM CORRECTION
 %% ================================================================================
 
 fprintf('\n================================================================\n');
 fprintf('STEP 4: POST-HOC CONTRASTS - CNO vs Vehicle within each time window\n');
-fprintf('        WITH BONFERRONI CORRECTION FOR MULTIPLE COMPARISONS\n');
+fprintf('        WITH BONFERRONI-HOLM SEQUENTIAL CORRECTION\n');
 fprintf('================================================================\n\n');
 
 contrast_results = struct();
+
+% **CHANGED: Collect all p-values across all models for Bonferroni-Holm**
+all_pvalues = [];
+all_test_info = {};
+
+for s = 1:size(states_to_test, 1)
+    state_mask = states_to_test{s, 1};
+    state_name = states_to_test{s, 2};
+    state_field = state_name;
+    
+    for m = 1:size(metrics_to_test, 1)
+        metric_var = metrics_to_test{m, 1};
+        metric_name = metrics_to_test{m, 2};
+        
+        % Check if model exists for this metric
+        if ~isfield(window_results.(state_field), metric_var)
+            continue;
+        end
+        
+        glme = window_results.(state_field).(metric_var).model;
+        data_subset = window_results.(state_field).(metric_var).data;
+        coef_names = window_results.(state_field).(metric_var).coefficient_names;
+        coef_pvals = window_results.(state_field).(metric_var).pvalues;
+        
+        % Get the actual windows present in this dataset
+        existing_windows = categories(data_subset.TimeWindow);
+        
+        % **CHANGED: Only test POST-INJECTION windows (exclude Pre)**
+        post_injection_windows = existing_windows(~strcmp(existing_windows, 'Pre'));
+        
+        % Loop through post-injection windows and collect p-values
+        for w = 1:length(post_injection_windows)
+            window_name = post_injection_windows{w};
+            
+            % Find the interaction term for this window
+            possible_names = {
+                sprintf('Condition_CNO:TimeWindow_%s', window_name);
+                sprintf('TimeWindow_%s:Condition_CNO', window_name);
+                sprintf('Condition_CNO:TimeWindow_%s', strrep(window_name, ' ', '_'));
+                sprintf('Condition_CNO:TimeWindow_%s', strrep(window_name, '-', '_'));
+            };
+            
+            term_idx = false(size(coef_names));
+            for name_try = 1:length(possible_names)
+                term_idx = strcmp(coef_names, possible_names{name_try});
+                if any(term_idx)
+                    break;
+                end
+            end
+            
+            if any(term_idx)
+                p_val = coef_pvals(term_idx);
+                all_pvalues = [all_pvalues; p_val];
+                all_test_info{end+1} = struct('state', state_field, 'metric', metric_var, ...
+                    'window', window_name, 'term_idx', term_idx);
+            end
+        end
+    end
+end
+
+% Apply Bonferroni-Holm correction
+n_tests = length(all_pvalues);
+[sorted_pvals, sort_idx] = sort(all_pvalues);
+holm_significant = false(n_tests, 1);
+
+fprintf('Applying Bonferroni-Holm sequential correction:\n');
+fprintf('  Total tests: %d\n', n_tests);
+fprintf('  Family-wise alpha: 0.05\n\n');
+
+for i = 1:n_tests
+    adjusted_alpha = 0.05 / (n_tests - i + 1);
+    if sorted_pvals(i) <= adjusted_alpha
+        holm_significant(sort_idx(i)) = true;
+        fprintf('  Test %d/%d: p=%.4f <= α=%.4f ✓ Significant\n', i, n_tests, sorted_pvals(i), adjusted_alpha);
+    else
+        fprintf('  Test %d/%d: p=%.4f > α=%.4f ✗ Stop testing\n', i, n_tests, sorted_pvals(i), adjusted_alpha);
+        break;
+    end
+end
+
+fprintf('\n');
+
+% **CHANGED: Now loop through and store results with Holm correction**
+test_counter = 0;
 
 for s = 1:size(states_to_test, 1)
     state_mask = states_to_test{s, 1};
@@ -389,37 +472,28 @@ for s = 1:size(states_to_test, 1)
         metric_var = metrics_to_test{m, 1};
         metric_name = metrics_to_test{m, 2};
         
-        % Check if model exists for this metric
         if ~isfield(window_results.(state_field), metric_var)
             continue;
         end
         
         fprintf('  Metric: %s\n', metric_name);
         
-        % FIXED: Extract model and data from stored results
         glme = window_results.(state_field).(metric_var).model;
         data_subset = window_results.(state_field).(metric_var).data;
         coef_names = window_results.(state_field).(metric_var).coefficient_names;
         coef_pvals = window_results.(state_field).(metric_var).pvalues;
         coef_estimates = window_results.(state_field).(metric_var).estimates;
         
-        % Get the actual windows present in this dataset
         existing_windows = categories(data_subset.TimeWindow);
-        
         contrast_results.(state_field).(metric_var) = struct();
         
-        % Calculate number of post-injection windows for Bonferroni correction
-        post_injection_windows = existing_windows(~strcmp(existing_windows, 'Baseline'));
-        n_comparisons = length(post_injection_windows);
-        alpha_bonferroni = 0.05 / n_comparisons;
+        post_injection_windows = existing_windows(~strcmp(existing_windows, 'Pre-Injection'));
         
-        fprintf('    Number of comparisons: %d\n', n_comparisons);
-        fprintf('    Bonferroni-corrected alpha: %.4f\n', alpha_bonferroni);
         fprintf('    Contrasts:\n');
         
-        % Loop through existing post-injection windows
         for w = 1:length(post_injection_windows)
             window_name = post_injection_windows{w};
+            test_counter = test_counter + 1;
             
             % Find window boundaries
             window_idx = find(strcmp(time_windows(:,1), window_name));
@@ -443,16 +517,13 @@ for s = 1:size(states_to_test, 1)
             pred_cno = pred_veh;
             pred_cno.Condition = categorical({'CNO'}, {'Vehicle', 'CNO'});
             
-            % Get predictions
             try
                 pred_val_veh = predict(glme, pred_veh, 'Conditional', false);
                 pred_val_cno = predict(glme, pred_cno, 'Conditional', false);
                 
-                % Calculate difference
                 diff_estimate = pred_val_cno - pred_val_veh;
                 
-                % Find the interaction term for this window
-                % Try multiple naming conventions
+                % Find the interaction term
                 possible_names = {
                     sprintf('Condition_CNO:TimeWindow_%s', window_name);
                     sprintf('TimeWindow_%s:Condition_CNO', window_name);
@@ -477,14 +548,18 @@ for s = 1:size(states_to_test, 1)
                     fprintf('      WARNING: Could not find interaction term for %s\n', window_name);
                 end
                 
-                % Apply Bonferroni correction
-                is_significant = ~isnan(p_val) && p_val < alpha_bonferroni;
+                % Apply Holm significance
+                is_significant = holm_significant(test_counter);
                 
-                % Determine significance string
+                % Determine significance string - grade stars based on corrected significance thresholds
                 if is_significant
-                    if p_val < 0.001 / n_comparisons
+                    % Use the Holm-adjusted alpha that this test passed
+                    test_rank = find(sort_idx == test_counter);
+                    adjusted_alpha = 0.05 / (n_tests - test_rank + 1);
+                    
+                    if adjusted_alpha <= 0.001 / n_tests
                         sig_str = '***';
-                    elseif p_val < 0.01 / n_comparisons
+                    elseif adjusted_alpha <= 0.01 / n_tests
                         sig_str = '**';
                     else
                         sig_str = '*';
@@ -492,9 +567,9 @@ for s = 1:size(states_to_test, 1)
                 else
                     sig_str = 'ns';
                 end
-                
-                fprintf('      %s: CNO-Vehicle = %.3f, p=%.4f %s (Bonf. α=%.4f)\n', ...
-                    window_name, diff_estimate, p_val, sig_str, alpha_bonferroni);
+
+                fprintf('      %s: CNO-Vehicle = %.3f, p=%.4f %s (Holm-corrected)\n', ...
+                    window_name, diff_estimate, p_val, sig_str);
                 
                 % Store results
                 window_field = sanitize_window_name(window_name);
@@ -502,11 +577,10 @@ for s = 1:size(states_to_test, 1)
                 contrast_results.(state_field).(metric_var).(window_field).estimate = diff_estimate;
                 contrast_results.(state_field).(metric_var).(window_field).p_value = p_val;
                 contrast_results.(state_field).(metric_var).(window_field).p_value_uncorrected = p_val;
-                contrast_results.(state_field).(metric_var).(window_field).alpha_bonferroni = alpha_bonferroni;
-                contrast_results.(state_field).(metric_var).(window_field).n_comparisons = n_comparisons;
                 contrast_results.(state_field).(metric_var).(window_field).significant = is_significant;
                 contrast_results.(state_field).(metric_var).(window_field).window_name = window_name;
                 contrast_results.(state_field).(metric_var).(window_field).se = se_val;
+                contrast_results.(state_field).(metric_var).(window_field).n_tests_total = n_tests;
                 
             catch ME
                 fprintf('      %s: Failed - %s\n', window_name, ME.message);
@@ -573,7 +647,7 @@ for s = 1:size(states_to_test, 1)
 
         if height(data_subset) < 10
             title(sprintf('%s\n(Insufficient data)', display_metric_name), 'FontSize', 12);
-        ylim([-5, 5]);
+            ylim([-5, 5]);
             continue;
         end
 
@@ -610,7 +684,7 @@ for s = 1:size(states_to_test, 1)
         
         % Create numeric x positions for each window
         window_positions = 1:length(existing_windows);
-        window_width = 0.8;  % Width for jittering within window
+        window_width = 0.8;
         
         % Plot data points with jitter within each window
         for w = 1:length(existing_windows)
@@ -621,7 +695,6 @@ for s = 1:size(states_to_test, 1)
             if any(cno_mask)
                 cno_vals = data_subset.(metric_var)(cno_mask);
                 n_cno = length(cno_vals);
-                % Add jitter
                 x_jitter = window_positions(w) + (rand(n_cno, 1) - 0.5) * window_width * 0.4 - 0.15;
                 scatter(x_jitter, cno_vals, 15, color_cno, 'filled', ...
                     'MarkerFaceAlpha', 0.3, 'HandleVisibility', ternary(w==1, 'on', 'off'), ...
@@ -633,7 +706,6 @@ for s = 1:size(states_to_test, 1)
             if any(veh_mask)
                 veh_vals = data_subset.(metric_var)(veh_mask);
                 n_veh = length(veh_vals);
-                % Add jitter
                 x_jitter = window_positions(w) + (rand(n_veh, 1) - 0.5) * window_width * 0.4 + 0.15;
                 scatter(x_jitter, veh_vals, 15, color_veh, 'filled', ...
                     'MarkerFaceAlpha', 0.3, 'HandleVisibility', ternary(w==1, 'on', 'off'), ...
@@ -641,13 +713,12 @@ for s = 1:size(states_to_test, 1)
             end
         end
         
-        % ===== OVERLAY MODEL PREDICTIONS WITH 95% CI =====
+        % OVERLAY MODEL PREDICTIONS WITH 95% CI
         if isfield(window_results.(state_field), metric_var)
             glme = window_results.(state_field).(metric_var).model;
             data_with_windows = window_results.(state_field).(metric_var).data;
             model_windows = categories(data_with_windows.TimeWindow);
             
-            % Create predictions for each window
             pred_x_veh = [];
             pred_y_veh = [];
             pred_ci_lower_veh = [];
@@ -661,18 +732,15 @@ for s = 1:size(states_to_test, 1)
             for w = 1:length(existing_windows)
                 window_name = existing_windows{w};
                 
-                % Only predict if this window was in the model
                 if ~ismember(window_name, model_windows)
                     continue;
                 end
                 
-                % Get window center time
                 window_idx = find(strcmp(time_windows(:,1), window_name));
                 t_start = time_windows{window_idx, 2};
                 t_end = time_windows{window_idx, 3};
                 t_center = mean([t_start, t_end]);
                 
-                % Create prediction tables
                 pred_veh = table();
                 pred_veh.Condition = categorical({'Vehicle'}, {'Vehicle', 'CNO'});
                 pred_veh.TimeWindow = categorical({window_name}, model_windows);
@@ -684,11 +752,9 @@ for s = 1:size(states_to_test, 1)
                 pred_cno.Condition = categorical({'CNO'}, {'Vehicle', 'CNO'});
                 
                 try
-                    % Get predictions with CI
                     [y_veh, ci_veh] = predict(glme, pred_veh, 'Conditional', false, 'Alpha', 0.05);
                     [y_cno, ci_cno] = predict(glme, pred_cno, 'Conditional', false, 'Alpha', 0.05);
                     
-                    % Store for plotting
                     pred_x_veh = [pred_x_veh; window_positions(w)];
                     pred_y_veh = [pred_y_veh; y_veh];
                     pred_ci_lower_veh = [pred_ci_lower_veh; ci_veh(1)];
@@ -698,23 +764,18 @@ for s = 1:size(states_to_test, 1)
                     pred_y_cno = [pred_y_cno; y_cno];
                     pred_ci_lower_cno = [pred_ci_lower_cno; ci_cno(1)];
                     pred_ci_upper_cno = [pred_ci_upper_cno; ci_cno(2)];
-                    
                 catch ME
-                    % Skip this window if prediction fails
                     continue;
                 end
             end
             
-            % Plot predictions with error bars
             if ~isempty(pred_x_veh)
-                % Vehicle
                 errorbar(pred_x_veh + 0.15, pred_y_veh, ...
                     pred_y_veh - pred_ci_lower_veh, pred_ci_upper_veh - pred_y_veh, ...
                     'o-', 'Color', color_veh, 'LineWidth', 2.5, 'MarkerSize', 8, ...
                     'MarkerFaceColor', color_veh, 'DisplayName', 'Vehicle model', ...
                     'CapSize', 6);
                 
-                % CNO
                 errorbar(pred_x_cno - 0.15, pred_y_cno, ...
                     pred_y_cno - pred_ci_lower_cno, pred_ci_upper_cno - pred_y_cno, ...
                     'o-', 'Color', color_cno, 'LineWidth', 2.5, 'MarkerSize', 8, ...
@@ -723,31 +784,25 @@ for s = 1:size(states_to_test, 1)
             end
         end
         
-% Add vertical separators between windows
+        % Add vertical separators between windows
         for w = 1:length(existing_windows)-1
             xline(window_positions(w) + 0.5, ':', 'Color', [0.7 0.7 0.7], ...
                 'LineWidth', 1.5, 'HandleVisibility', 'off');
         end
         
-        % Format x-axis with window labels (names only)
-        xticks(window_positions);
-        xticklabels(existing_windows);
-        xtickangle(45);
-        
-        % Set title and limits
+        % Set title and INITIAL limits
         title(display_metric_name, 'FontSize', 12, 'FontWeight', 'bold');
-        ylim([-5, 5]);
-
-        % % Individual y-axis per metric
-        % metric_data = data_subset.(metric_var);
-        % ylim_low = prctile(metric_data, 0.5);
-        % ylim_high = prctile(metric_data, 99.5);
-        % padding = (ylim_high - ylim_low) * 0.15;
-        % ylim([ylim_low - padding, ylim_high + padding]);
         
-        % Add significance stars AFTER ylim is set
+        % Individual y-axis per metric
+        metric_data = data_subset.(metric_var);
+        ylim_low = prctile(metric_data, 0.5);
+        ylim_high = prctile(metric_data, 99.5);
+        padding = (ylim_high - ylim_low) * 0.15;
+        ylim([ylim_low - padding, ylim_high + padding]);
+        
+        % **CHANGED: Add significance stars AFTER ylim is set, only for POST-INJECTION bins**
         if isfield(contrast_results.(state_field), metric_var)
-            current_ylim = ylim;  % <-- NOW THIS GETS THE CORRECT YLIM
+            current_ylim = ylim;
             y_pos = current_ylim(2) * 0.88;
             
             tested_window_fields = fieldnames(contrast_results.(state_field).(metric_var));
@@ -756,23 +811,25 @@ for s = 1:size(states_to_test, 1)
                 window_field = tested_window_fields{w};
                 result_struct = contrast_results.(state_field).(metric_var).(window_field);
                 
+                % Only show stars for post-injection windows
+                if strcmp(result_struct.window_name, 'Pre-Injection')
+                    continue;  % Skip Pre bin
+                end
+                
                 if result_struct.significant
                     window_name = result_struct.window_name;
                     
-                    % Find position
                     window_pos_idx = find(strcmp(existing_windows, window_name));
                     if ~isempty(window_pos_idx)
                         p_val = result_struct.p_value;
-                        n_comp = result_struct.n_comparisons;
                         
-                        if p_val < 0.001 / n_comp
+                        % Star grading based on UNCORRECTED p-value
+                        if p_val < 0.001
                             star_text = '***';
-                        elseif p_val < 0.01 / n_comp
+                        elseif p_val < 0.01
                             star_text = '**';
-                        elseif p_val < 0.05 / n_comp
-                            star_text = '*';
                         else
-                            star_text = '';
+                            star_text = '*';
                         end
                         
                         if ~isempty(star_text)
@@ -785,19 +842,10 @@ for s = 1:size(states_to_test, 1)
             end
         end
         
-        % Format x-axis with window labels (names only)
+        % Format x-axis
         xticks(window_positions);
         xticklabels(existing_windows);
         xtickangle(45);
-        
-        % Set title and limits
-        title(display_metric_name, 'FontSize', 12, 'FontWeight', 'bold');
-        % Individual y-axis per metric
-        metric_data = data_subset.(metric_var);
-        ylim_low = prctile(metric_data, 0.5);
-        ylim_high = prctile(metric_data, 99.5);
-        padding = (ylim_high - ylim_low) * 0.15;
-        ylim([ylim_low - padding, ylim_high + padding]);        
         xlim([0.5, length(existing_windows) + 0.5]);
         grid on;
         box on;
@@ -805,9 +853,7 @@ for s = 1:size(states_to_test, 1)
 
     % Add shared Y label
     ylabel(tl, 'Z-Score', 'FontSize', 12, 'FontWeight', 'bold');
-    % Add shared X label
     xlabel(tl, 'Time Window', 'FontSize', 12, 'FontWeight', 'bold');
-
 
     % Create legend
     lgd = legend(tl.Children(end), 'Location', 'northoutside', ...
@@ -828,7 +874,7 @@ end
 
 fprintf('\nVisualization complete!\n');
 fprintf('\n================================================================\n');
-fprintf('ANALYSIS COMPLETE - All results include Bonferroni correction\n');
+fprintf('ANALYSIS COMPLETE - All results include Bonferroni-Holm correction\n');
 fprintf('================================================================\n');
 
 % Helper function for ternary operator
@@ -837,429 +883,5 @@ function result = ternary(condition, true_val, false_val)
         result = true_val;
     else
         result = false_val;
-    end
-end
-
-
-%% ================================================================================
-%% BEHAVIOURAL STATE DISTRIBUTION ANALYSIS
-%% Quantify CNO-induced locomotor confound
-%% ================================================================================
-
-fprintf('\n================================================================\n');
-fprintf('BEHAVIOURAL STATE DISTRIBUTION ANALYSIS\n');
-fprintf('Identifying CNO-induced locomotor effects as potential confound\n');
-fprintf('================================================================\n\n');
-
-%% Assumes already have T_clean loaded with time windows assigned
-% If not, load your data first:
-% load('path/to/your/data.mat');
-
-% Define time windows (same as in main analysis)
-time_windows = {
-    'Pre-Injection',       -100, 0;     % Pre-injection baseline
-    '0-1hr',                 0, 60;     % Contains max potency and rise up quick pharmacological action
-    '1-2hrs',              60, 120;     % Duration of stability
-    '2-5hrs',             120, 300;     % Clearance/washout (180min clearance studies)
-};
-
-% Assign time windows to data if not already done
-if ~ismember('TimeWindow', T_clean.Properties.VariableNames)
-    T_clean.TimeWindow = categorical(repmat({'Unknown'}, height(T_clean), 1));
-    for w = 1:size(time_windows, 1)
-        window_name = time_windows{w, 1};
-        t_start = time_windows{w, 2};
-        t_end = time_windows{w, 3};
-        mask = T_clean.time_min >= t_start & T_clean.time_min <= t_end;
-        T_clean.TimeWindow(mask) = categorical({window_name});
-    end
-    T_clean = T_clean(T_clean.TimeWindow ~= 'Unknown', :);
-    T_clean.TimeWindow = removecats(T_clean.TimeWindow, 'Unknown');
-end
-
-%% ================================================================================
-%% 1. COUNT OBSERVATIONS PER CONDITION × TIME WINDOW × BEHAVIOURAL STATE
-%% ================================================================================
-
-fprintf('STEP 1: Counting observations per Condition × Time Window × State\n');
-fprintf('------------------------------------------------------------------\n\n');
-
-% Initialize results table
-distribution_table = table();
-
-conditions = {'Vehicle', 'CNO'};
-behavioural_states = {'Active', 'Quiescent'};
-window_names = time_windows(:, 1);
-
-% Count for each combination
-for c = 1:length(conditions)
-    condition = conditions{c};
-    
-    for w = 1:length(window_names)
-        window = window_names{w};
-        
-        for b = 1:length(behavioural_states)
-            state = behavioural_states{b};
-            
-            % Count observations (using == for categorical variables)
-            mask = T_clean.Condition == condition & ...
-                   T_clean.TimeWindow == window & ...
-                   T_clean.BehaviouralGroup == state;
-            
-            n_obs = sum(mask);
-            
-            % Calculate percentage within this condition+window
-            total_in_window = sum(T_clean.Condition == condition & ...
-                                  T_clean.TimeWindow == window);
-            
-            if total_in_window > 0
-                pct = 100 * n_obs / total_in_window;
-            else
-                pct = 0;
-            end
-            
-            % Add to table
-            row = table({condition}, {window}, {state}, n_obs, pct, ...
-                'VariableNames', {'Condition', 'TimeWindow', 'State', 'N_Observations', 'Percentage'});
-            distribution_table = [distribution_table; row];
-        end
-    end
-end
-
-% Display the table
-fprintf('Distribution of observations:\n\n');
-disp(distribution_table);
-
-%% ================================================================================
-%% 2. CREATE SUMMARY TABLE FOR PAPER/SUPPLEMENTARY
-%% ================================================================================
-
-fprintf('\n================================================================\n');
-fprintf('STEP 2: Creating Summary Table\n');
-fprintf('================================================================\n\n');
-
-% Reshape for easier viewing
-summary_table = table();
-
-for w = 1:length(window_names)
-    window = window_names{w};
-    
-    % Vehicle counts
-    veh_active = distribution_table.N_Observations(...
-        strcmp(distribution_table.Condition, 'Vehicle') & ...
-        strcmp(distribution_table.TimeWindow, window) & ...
-        strcmp(distribution_table.State, 'Active'));
-    
-    veh_quiescent = distribution_table.N_Observations(...
-        strcmp(distribution_table.Condition, 'Vehicle') & ...
-        strcmp(distribution_table.TimeWindow, window) & ...
-        strcmp(distribution_table.State, 'Quiescent'));
-    
-    veh_total = veh_active + veh_quiescent;
-    if veh_total > 0
-        veh_pct_active = 100 * veh_active / veh_total;
-    else
-        veh_pct_active = NaN;
-    end
-    
-    % CNO counts
-    cno_active = distribution_table.N_Observations(...
-        strcmp(distribution_table.Condition, 'CNO') & ...
-        strcmp(distribution_table.TimeWindow, window) & ...
-        strcmp(distribution_table.State, 'Active'));
-    
-    cno_quiescent = distribution_table.N_Observations(...
-        strcmp(distribution_table.Condition, 'CNO') & ...
-        strcmp(distribution_table.TimeWindow, window) & ...
-        strcmp(distribution_table.State, 'Quiescent'));
-    
-    cno_total = cno_active + cno_quiescent;
-    if cno_total > 0
-        cno_pct_active = 100 * cno_active / cno_total;
-    else
-        cno_pct_active = NaN;
-    end
-    
-    % Add to summary
-    row = table({window}, ...
-        veh_active, veh_quiescent, veh_total, veh_pct_active, ...
-        cno_active, cno_quiescent, cno_total, cno_pct_active, ...
-        'VariableNames', {'TimeWindow', ...
-        'Vehicle_Active', 'Vehicle_Quiescent', 'Vehicle_Total', 'Vehicle_PctActive', ...
-        'CNO_Active', 'CNO_Quiescent', 'CNO_Total', 'CNO_PctActive'});
-    
-    summary_table = [summary_table; row];
-end
-
-fprintf('Summary Table:\n\n');
-disp(summary_table);
-
-% Highlight the problem windows
-fprintf('\n*** CRITICAL FINDINGS ***\n');
-problem_found = false;
-for w = 1:height(summary_table)
-    if summary_table.CNO_Quiescent(w) < 20
-        pct_quiescent = 100 - summary_table.CNO_PctActive(w);
-        if isnan(pct_quiescent)
-            pct_str = 'N/A';
-        else
-            pct_str = sprintf('%.1f%%', pct_quiescent);
-        end
-        fprintf(' %s: Only %d CNO quiescent observations (%s of CNO data)\n', ...
-            summary_table.TimeWindow{w}, ...
-            summary_table.CNO_Quiescent(w), ...
-            pct_str);
-        problem_found = true;
-    end
-end
-if ~problem_found
-    fprintf('✓ All time windows have adequate CNO quiescent data (n≥20)\n');
-end
-
-%% ================================================================================
-%% 3. VISUALIZE THE CONFOUND
-%% ================================================================================
-
-fprintf('\n================================================================\n');
-fprintf('STEP 3: Creating Visualization\n');
-fprintf('================================================================\n\n');
-
-% Check if we have any data to visualize
-if all(summary_table.Vehicle_Total == 0) && all(summary_table.CNO_Total == 0)
-    fprintf(' No data available for visualization\n');
-    fprintf('    Please check that T_clean has Condition and BehaviouralGroup variables\n\n');
-else
-    
-fig = figure('Position', [100, 100, 1400, 600], 'Color', 'w');
-
-% Colors
-% Define 4 distinct colors for Vehicle/CNO × Active/Quiescent
-color_veh_quiescent = [0.4, 0.7, 1.0];      % Light blue
-color_cno_quiescent = [0, 0.3, 0.6];        % Dark blue  
-color_veh_active = [1.0, 0.6, 0.3];         % Light orange
-color_cno_active = [0.8, 0.25, 0.05];       % Dark orange/red
-
-%% Panel A: 4-bar grouped chart showing the confound clearly
-subplot(1, 2, 1);
-hold on;
-
-n_windows = height(summary_table);
-x_pos = 1:n_windows;
-
-% Define bar dimensions - 4 bars per window
-bar_width = 0.18;  % Width of individual bars
-spacing = 0.22;    % Spacing between bars
-
-% Plot 4 bars per window: Veh-Quies, CNO-Quies, Veh-Active, CNO-Active
-h_bars = [];  % Store handles for legend
-
-for i = 1:n_windows
-    center = i;  % Center position for this time window
-    
-    % Calculate positions for 4 bars centered around window position
-    pos1 = center - 1.5*spacing;  % Vehicle Quiescent
-    pos2 = center - 0.5*spacing;  % CNO Quiescent
-    pos3 = center + 0.5*spacing;  % Vehicle Active
-    pos4 = center + 1.5*spacing;  % CNO Active
-    
-    % Plot 4 bars
-    h1 = bar(pos1, summary_table.Vehicle_Quiescent(i), bar_width, ...
-        'FaceColor', color_veh_quiescent, 'EdgeColor', 'k', 'LineWidth', 0.5);
-    h2 = bar(pos2, summary_table.CNO_Quiescent(i), bar_width, ...
-        'FaceColor', color_cno_quiescent, 'EdgeColor', 'k', 'LineWidth', 0.5);
-    h3 = bar(pos3, summary_table.Vehicle_Active(i), bar_width, ...
-        'FaceColor', color_veh_active, 'EdgeColor', 'k', 'LineWidth', 0.5);
-    h4 = bar(pos4, summary_table.CNO_Active(i), bar_width, ...
-        'FaceColor', color_cno_active, 'EdgeColor', 'k', 'LineWidth', 0.5);
-    
-    % Store handles from first iteration for legend
-    if i == 1
-        h_bars = [h1, h2, h3, h4];
-    end
-    
-    % Highlight problem windows with very low CNO quiescent data
-    if summary_table.CNO_Quiescent(i) < 20
-        % Add warning marker above CNO quiescent bar
-        y_max = max([summary_table.Vehicle_Quiescent(:); summary_table.CNO_Quiescent(:); ...
-                     summary_table.Vehicle_Active(:); summary_table.CNO_Active(:)]);
-        text(pos2, summary_table.CNO_Quiescent(i) + 0.05*y_max, '!', ...
-            'FontSize', 16, 'FontWeight', 'bold', 'Color', 'r', ...
-            'HorizontalAlignment', 'center');
-    end
-end
-
-% Format
-xticks(1:n_windows);
-xticklabels(summary_table.TimeWindow);
-xtickangle(45);
-ylabel('Number of Observations', 'FontWeight', 'bold', 'FontSize', 11);
-xlabel('Time Window', 'FontWeight', 'bold', 'FontSize', 11);
-title('Behavioural State Distribution: Vehicle vs CNO', 'FontSize', 13, 'FontWeight', 'bold');
-
-% Create legend
-legend(h_bars, {'Quiescent (Vehicle)', 'Quiescent (CNO)', 'Active (Vehicle)', 'Active (CNO)'}, ...
-    'Location', 'northwest', 'FontSize', 9);
-
-y_max = max([summary_table.Vehicle_Quiescent(:); summary_table.CNO_Quiescent(:); ...
-             summary_table.Vehicle_Active(:); summary_table.CNO_Active(:)]);
-ylim([0, y_max * 1.15]);  % Start from 0, add padding for warning markers
-grid on;
-box on;
-
-%% Panel B: Percentage Active over time
-subplot(1, 2, 2);
-hold on;
-
-x_pos = 1:n_windows;
-
-plot(x_pos, summary_table.Vehicle_PctActive, 'o-', 'Color', [0, 0.4470, 0.7410], ...
-    'LineWidth', 3, 'MarkerSize', 10, 'MarkerFaceColor', [0, 0.4470, 0.7410], ...
-    'DisplayName', 'Vehicle');
-
-plot(x_pos, summary_table.CNO_PctActive, 'o-', 'Color', [0.8500, 0.3250, 0.0980], ...
-    'LineWidth', 3, 'MarkerSize', 10, 'MarkerFaceColor', [0.8500, 0.3250, 0.0980], ...
-    'DisplayName', 'CNO');
-
-% Add horizontal line at 50%
-yline(50, '--', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.5, 'HandleVisibility', 'off');
-
-xticks(1:n_windows);
-xticklabels(summary_table.TimeWindow);
-xtickangle(45);
-ylabel('% Time Active', 'FontWeight', 'bold');
-xlabel('Time Window', 'FontWeight', 'bold');
-title('Percentage of Time Spent Moving for Each Time Window', 'FontSize', 14, 'FontWeight', 'bold');
-legend('Location', 'northeast');
-ylim([0 100]);    % Percentage must be 0-100
-yticks(0:10:100);  % Add tick marks every 10%
-grid on;
-box on;
-
-%% Save figure
-saveas(fig, fullfile(output_path, 'Behavioural_State_Confound_Analysis.png'));
-fprintf('Saved: Behavioural_State_Confound_Analysis.png\n');
-
-end  % End of data validation check
-
-%% ================================================================================
-%% 4. STATISTICAL TEST: CHI-SQUARE FOR STATE DISTRIBUTION DIFFERENCES
-%% ================================================================================
-
-fprintf('\n================================================================\n');
-fprintf('STEP 4: Statistical Testing of Behavioural State Distribution\n');
-fprintf('================================================================\n\n');
-
-for w = 2:height(summary_table)  % Skip baseline
-    window = summary_table.TimeWindow{w};
-    
-    % Create contingency table
-    contingency = [summary_table.Vehicle_Active(w), summary_table.Vehicle_Quiescent(w); ...
-                   summary_table.CNO_Active(w), summary_table.CNO_Quiescent(w)];
-    
-    fprintf('%s:\n', window);
-    fprintf('  Contingency table:\n');
-    fprintf('               Active    Quiescent\n');
-    fprintf('    Vehicle:   %4d      %4d\n', contingency(1,1), contingency(1,2));
-    fprintf('    CNO:       %4d      %4d\n', contingency(2,1), contingency(2,2));
-    
-    % Check if we have sufficient data for chi-square test
-    if sum(contingency(:)) < 10 || any(contingency(:) < 1)
-        fprintf('  Insufficient data for chi-square test (total n=%d)\n\n', sum(contingency(:)));
-        continue;
-    end
-    
-    % Chi-square test using chi2test
-    try
-        [~, p_val, stats] = chi2test(contingency);
-        
-        if p_val < 0.001
-            fprintf('  χ² = %.2f, p < 0.001 ***\n\n', stats);
-        elseif p_val < 0.01
-            fprintf('  χ² = %.2f, p = %.4f **\n\n', stats, p_val);
-        elseif p_val < 0.05
-            fprintf('  χ² = %.2f, p = %.4f *\n\n', stats, p_val);
-        else
-            fprintf('  χ² = %.2f, p = %.4f ns\n\n', stats, p_val);
-        end
-    catch
-        fprintf('  Chi-square test failed for this window\n\n');
-    end
-end
-
-% Helper function for chi-square test
-function [h, p, chi2stat] = chi2test(observed)
-    % Chi-square test for contingency table
-    % observed: 2x2 contingency table
-    
-    row_totals = sum(observed, 2);
-    col_totals = sum(observed, 1);
-    n = sum(observed(:));
-    
-    % Calculate expected frequencies
-    expected = (row_totals * col_totals) / n;
-    
-    % Calculate chi-square statistic
-    chi2stat = sum((observed(:) - expected(:)).^2 ./ expected(:));
-    
-    % Degrees of freedom
-    df = (size(observed, 1) - 1) * (size(observed, 2) - 1);
-    
-    % P-value
-    p = 1 - chi2cdf(chi2stat, df);
-    
-    % Hypothesis test (alpha = 0.05)
-    h = p < 0.05;
-end
-
-%% ================================================================================
-%% 5. EXPORT TABLE 
-%% ================================================================================
-
-% Create table
-pub_table = table();
-pub_table.TimeWindow = summary_table.TimeWindow;
-pub_table.Vehicle_N = summary_table.Vehicle_Total;
-pub_table.Vehicle_PctActive = summary_table.Vehicle_PctActive;
-pub_table.CNO_N = summary_table.CNO_Total;
-pub_table.CNO_PctActive = summary_table.CNO_PctActive;
-
-% Add flag for insufficient data
-pub_table.Sufficient_CNO_Quiescent = summary_table.CNO_Quiescent >= 20;
-
-% Display
-fprintf('summary:\n\n');
-disp(pub_table);
-
-% Save to CSV
-writetable(pub_table, fullfile(output_path, 'Behavioural_State_Distribution_Summary.csv'));
-
-% Save full distribution table
-writetable(distribution_table, fullfile(output_path, 'Behavioural_State_Distribution_Full.csv'));
-
-fprintf('\n================================================================\n');
-fprintf('BEHAVIOURAL STATE ANALYSIS COMPLETE\n');
-fprintf('================================================================\n\n');
-
-
-
-
-
-%% Helper function to sanitise window names for field names
-function field_name = sanitize_window_name(window_name)
-    % Convert window name to valid MATLAB field name
-    field_name = window_name;
-    
-    % Replace spaces with underscores
-    field_name = strrep(field_name, ' ', '_');
-    
-    % Replace hyphens with 'to'
-    field_name = strrep(field_name, '-', 'to');
-    
-    % Remove 'to' text (from "181 to 360")
-    field_name = strrep(field_name, '_to_', 'to');
-    
-    % If starts with number, add 'W' prefix (Window)
-    if ~isempty(field_name) && isstrprop(field_name(1), 'digit')
-        field_name = ['W' field_name];
     end
 end
