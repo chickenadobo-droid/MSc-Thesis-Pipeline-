@@ -1,0 +1,370 @@
+%% ================================================================================
+%% THETA-RIPPLE COUPLING SCRIPT: Z-Scored Power Analysis
+%% All Behavioural States Combined
+%% ================================================================================
+% 
+% This script:
+% 1. Loads and FULLY CLEANS the data (removes B7, contaminated sessions, outliers).
+% 2. Uses Z-SCORED power values (0 = session mean):
+%    - theta_power_z_corrected
+%    - ripple_power_z
+% 3. Plots Z-scored Theta vs. Z-scored Ripple for post-injection period
+
+clc; clear; close all;
+fprintf('\n');
+fprintf('================================================================\n');
+fprintf('THETA-RIPPLE COUPLING: Z-Scored Power (0 = session mean)\n');
+fprintf('================================================================\n\n');
+
+%% ================================================================================
+%% STEP 1: LOAD & CLEAN DATA
+%% ================================================================================
+fprintf('STEP 1: Loading and Cleaning Data...\n');
+fprintf('--------------------------------------\n');
+
+% --- DEFINITIONS ---
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+output_path = fullfile(table_path, 'FinalAnalysis_Clean');
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+
+% Load Data
+load(fullfile(table_path, 'Final_Table_for_GLM_cleanMUA_NewZ.mat'), 'Final_GLM_Table');
+fprintf('  Loaded: Final_Table_for_GLM_cleanMUA_NewZ.mat (%d rows)\n', height(Final_GLM_Table));
+T_clean = Final_GLM_Table;
+fprintf('  Final Rows: %d\n', height(T_clean));
+
+%% ================================================================================
+%% STEP 2: PLOT THETA-RIPPLE CORRELATION (POST-INJECTION ONLY)
+%% ================================================================================
+fprintf('================================================================\n');
+fprintf('STEP 2: Plotting Theta-Ripple Correlation (Post-Injection)\n');
+fprintf('================================================================\n\n');
+
+% Filter for Post-Injection Data Only (exclude injection timepoint)
+T_post = T_clean(T_clean.time_min > 0, :);
+fprintf('  Post-injection timepoints: %d\n', height(T_post));
+
+% Separate Conditions
+cno_mask = T_post.Condition == 'CNO';
+veh_mask = T_post.Condition == 'Vehicle';
+
+% Create Figure
+fig_corr = figure('Position', [100, 100, 800, 700], 'Color', 'w');
+hold on;
+color_cno = [0.8500, 0.3250, 0.0980];  % Orange
+color_veh = [0, 0.4470, 0.7410];       % Blue
+
+%% --- EXTRACT DATA ---
+% Vehicle
+x_veh = T_post.theta_power_z_corrected(veh_mask);
+y_veh = T_post.ripple_power_z(veh_mask);
+
+% CNO
+x_cno = T_post.theta_power_z_corrected(cno_mask);
+y_cno = T_post.ripple_power_z(cno_mask);
+
+% Remove NaNs, Infs, and outliers (>5 SD for both theta and ripple power)
+valid_veh = ~isnan(x_veh) & ~isnan(y_veh) & ~isinf(x_veh) & ~isinf(y_veh) & abs(x_veh) <= 5 & abs(y_veh) <= 4.5;
+valid_cno = ~isnan(x_cno) & ~isnan(y_cno) & ~isinf(x_cno) & ~isinf(y_cno) & abs(x_cno) <= 5 & abs(y_cno) <= 4.5;
+x_veh = x_veh(valid_veh);
+y_veh = y_veh(valid_veh);
+x_cno = x_cno(valid_cno);
+y_cno = y_cno(valid_cno);
+fprintf('  Vehicle: %d timepoints\n', length(x_veh));
+fprintf('  CNO: %d timepoints\n', length(x_cno));
+
+%% --- SCATTER PLOTS ---
+scatter(x_veh, y_veh, 20, color_veh, 'filled', 'MarkerFaceAlpha', 0.3);
+scatter(x_cno, y_cno, 20, color_cno, 'filled', 'MarkerFaceAlpha', 0.3);
+
+%% --- CORRELATIONS ---
+[r_veh, p_veh] = corr(x_veh, y_veh);
+[r_cno, p_cno] = corr(x_cno, y_cno);
+
+fprintf('\n  CORRELATIONS:\n');
+fprintf('    Vehicle: r=%.3f, p=%.4e\n', r_veh, p_veh);
+fprintf('    CNO:     r=%.3f, p=%.4e\n', r_cno, p_cno);
+
+%% --- REGRESSION LINES ---
+if length(x_veh) > 1
+    p1 = polyfit(x_veh, y_veh, 1);
+    x_range_veh = linspace(min(x_veh), max(x_veh), 100);
+    plot(x_range_veh, polyval(p1, x_range_veh), 'Color', color_veh, 'LineWidth', 3);
+end
+
+if length(x_cno) > 1
+    p2 = polyfit(x_cno, y_cno, 1);
+    x_range_cno = linspace(min(x_cno), max(x_cno), 100);
+    plot(x_range_cno, polyval(p2, x_range_cno), 'Color', color_cno, 'LineWidth', 3);
+end
+
+%% --- LABELS AND FORMATTING ---
+xlabel('Theta Power (Z-Scored)', 'FontSize', 12);
+ylabel('Ripple Power (Z-Scored)', 'FontSize', 12);
+title('Theta-Ripple Coupling (Post-Injection)', 'FontSize', 14, 'FontWeight', 'bold');
+
+legend({sprintf('Vehicle', length(x_veh), r_veh, p_veh), ...
+        sprintf('CNO', length(x_cno), r_cno, p_cno)}, ...
+       'Location', 'best', 'FontSize', 11);
+
+grid on;
+axis square;
+
+% Add zero reference lines
+xline(0, 'k--', 'LineWidth', 0.5, 'Alpha', 0.3, HandleVisibility='off');
+yline(0, 'k--', 'LineWidth', 0.5, 'Alpha', 0.3, HandleVisibility='off');
+
+%% --- SAVE ---
+saveas(fig_corr, fullfile(output_path, 'ThetaRipple_Zscore_Coupling.jpg'));
+saveas(fig_corr, fullfile(output_path, 'ThetaRipple_Zscore_Coupling.png'));
+fprintf('\n  Saved: ThetaRipple_Zscore_Coupling.jpg/png\n');
+
+%% ================================================================================
+%% SUMMARY STATISTICS
+%% ================================================================================
+fprintf('\n================================================================\n');
+fprintf('SUMMARY: Theta-Ripple Coupling Analysis\n');
+fprintf('================================================================\n');
+fprintf('\nCORRELATIONS (Post-Injection):\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e (n=%d)\n', r_veh, p_veh, length(x_veh));
+fprintf('  CNO:     r=%.3f, p=%.4e (n=%d)\n', r_cno, p_cno, length(x_cno));
+fprintf('\n================================================================\n');
+fprintf('Analysis Complete.\n');
+fprintf('================================================================\n');
+
+%% ================================================================================
+%% NEURAL ACTIVITY vs. SPEED
+%% ================================================================================
+
+%% LOAD DATA
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+output_path = fullfile(table_path, 'FinalAnalysis_Clean');
+if ~exist(output_path, 'dir'), mkdir(output_path); end
+
+load(fullfile(table_path, 'Final_Table_for_GLM_cleanMUA_NewZ.mat'), 'Final_GLM_Table');
+T_clean = Final_GLM_Table;
+
+% Filter post-injection only
+T_post = T_clean(T_clean.time_min > 0, :);
+
+% Separate conditions
+cno_mask = T_post.Condition == 'CNO';
+veh_mask = T_post.Condition == 'Vehicle';
+
+% Colors
+color_cno = [0.8500, 0.3250, 0.0980];  % Orange
+color_veh = [0, 0.4470, 0.7410];       % Blue
+
+%% CREATE FIGURE
+fig = figure('Position', [100, 100, 1400, 350], 'Color', 'w');
+
+%% PANEL 1: THETA POWER vs SPEED
+subplot(1,4,1); hold on;
+
+% Vehicle
+x_veh = T_post.speed_cm_s_mean(veh_mask);
+y_veh = T_post.theta_power_z_corrected(veh_mask);
+valid = ~isnan(x_veh) & ~isnan(y_veh) & ~isinf(x_veh) & ~isinf(y_veh);
+x_veh = x_veh(valid);
+y_veh = y_veh(valid);
+
+scatter(x_veh, y_veh, 15, color_veh, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_veh, p_veh] = corr(x_veh, y_veh);
+p1 = polyfit(x_veh, y_veh, 1);
+x_range = linspace(min(x_veh), max(x_veh), 100);
+plot(x_range, polyval(p1, x_range), 'Color', color_veh, 'LineWidth', 2.5);
+
+% CNO
+x_cno = T_post.speed_cm_s_mean(cno_mask);
+y_cno = T_post.theta_power_z_corrected(cno_mask);
+valid = ~isnan(x_cno) & ~isnan(y_cno) & ~isinf(x_cno) & ~isinf(y_cno);
+x_cno = x_cno(valid);
+y_cno = y_cno(valid);
+
+scatter(x_cno, y_cno, 15, color_cno, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_cno, p_cno] = corr(x_cno, y_cno);
+p2 = polyfit(x_cno, y_cno, 1);
+x_range = linspace(min(x_cno), max(x_cno), 100);
+plot(x_range, polyval(p2, x_range), 'Color', color_cno, 'LineWidth', 2.5);
+
+ylabel('Z-score', 'FontSize', 11);
+title('Theta Power', 'FontSize', 12, 'FontWeight', 'bold');
+xlim([0 6]); grid on;
+
+fprintf('Theta Power:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e\n', r_veh, p_veh);
+fprintf('  CNO:     r=%.3f, p=%.4e\n\n', r_cno, p_cno);
+
+[r_veh_theta, p_veh_theta] = corr(x_veh, y_veh);
+[r_cno_theta, p_cno_theta] = corr(x_cno, y_cno);
+% Save the x vectors too
+x_veh_theta = x_veh;
+x_cno_theta = x_cno;
+
+%% PANEL 2: THETA FREQUENCY vs SPEED
+subplot(1,4,2); hold on;
+
+% Vehicle - need to reload x from original data
+x_veh = T_post.speed_cm_s_mean(veh_mask);
+y_veh = T_post.theta_freq_weighted_mean_corrected(veh_mask);
+valid = ~isnan(x_veh) & ~isnan(y_veh) & ~isinf(x_veh) & ~isinf(y_veh);
+x_veh_f = x_veh(valid);
+y_veh = y_veh(valid);
+
+scatter(x_veh_f, y_veh, 15, color_veh, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_veh, p_veh] = corr(x_veh_f, y_veh);
+p1 = polyfit(x_veh_f, y_veh, 1);
+x_range = linspace(min(x_veh_f), max(x_veh_f), 100);
+plot(x_range, polyval(p1, x_range), 'Color', color_veh, 'LineWidth', 2.5);
+
+% CNO - need to reload x from original data
+x_cno = T_post.speed_cm_s_mean(cno_mask);
+y_cno = T_post.theta_freq_weighted_mean_corrected(cno_mask);
+valid = ~isnan(x_cno) & ~isnan(y_cno) & ~isinf(x_cno) & ~isinf(y_cno);
+x_cno_f = x_cno(valid);
+y_cno = y_cno(valid);
+
+scatter(x_cno_f, y_cno, 15, color_cno, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_cno, p_cno] = corr(x_cno_f, y_cno);
+p2 = polyfit(x_cno_f, y_cno, 1);
+x_range = linspace(min(x_cno_f), max(x_cno_f), 100);
+plot(x_range, polyval(p2, x_range), 'Color', color_cno, 'LineWidth', 2.5);
+
+ylabel('Weighted Mean Frequency (Hz)', 'FontSize', 11);
+title('Theta Frequency', 'FontSize', 12, 'FontWeight', 'bold');
+xlim([0 6]); grid on;
+fprintf('Theta Frequency:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e\n', r_veh, p_veh);
+fprintf('  CNO:     r=%.3f, p=%.4e\n\n', r_cno, p_cno);
+[r_veh_freq, p_veh_freq] = corr(x_veh_f, y_veh);
+[r_cno_freq, p_cno_freq] = corr(x_cno_f, y_cno);
+
+%% PANEL 3: RIPPLE POWER vs SPEED
+subplot(1,4,3); hold on;
+
+% Vehicle
+x_veh = T_post.speed_cm_s_mean(veh_mask);
+y_veh = T_post.ripple_power_z(veh_mask);
+valid = ~isnan(x_veh) & ~isnan(y_veh) & ~isinf(x_veh) & ~isinf(y_veh);
+x_veh = x_veh(valid);
+y_veh = y_veh(valid);
+
+scatter(x_veh, y_veh, 15, color_veh, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_veh, p_veh] = corr(x_veh, y_veh);
+p1 = polyfit(x_veh, y_veh, 1);
+x_range = linspace(min(x_veh), max(x_veh), 100);
+plot(x_range, polyval(p1, x_range), 'Color', color_veh, 'LineWidth', 2.5);
+
+% CNO
+x_cno = T_post.speed_cm_s_mean(cno_mask);
+y_cno = T_post.ripple_power_z(cno_mask);
+valid = ~isnan(x_cno) & ~isnan(y_cno) & ~isinf(x_cno) & ~isinf(y_cno);
+x_cno = x_cno(valid);
+y_cno = y_cno(valid);
+
+scatter(x_cno, y_cno, 15, color_cno, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_cno, p_cno] = corr(x_cno, y_cno);
+p2 = polyfit(x_cno, y_cno, 1);
+x_range = linspace(min(x_cno), max(x_cno), 100);
+plot(x_range, polyval(p2, x_range), 'Color', color_cno, 'LineWidth', 2.5);
+
+ylabel('Z-score', 'FontSize', 11);
+title('Ripple Power', 'FontSize', 12, 'FontWeight', 'bold');
+xlim([0 6]); grid on;
+
+fprintf('Ripple Power:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e\n', r_veh, p_veh);
+fprintf('  CNO:     r=%.3f, p=%.4e\n\n', r_cno, p_cno);
+
+[r_veh_rip, p_veh_rip] = corr(x_veh, y_veh);
+[r_cno_rip, p_cno_rip] = corr(x_cno, y_cno);
+x_veh_rip = x_veh;
+x_cno_rip = x_cno;
+
+%% PANEL 4: RIPPLE EVENTS vs SPEED
+subplot(1,4,4); hold on;
+
+% Vehicle
+x_veh = T_post.speed_cm_s_mean(veh_mask);
+y_veh = T_post.ripple_events(veh_mask);
+valid = ~isnan(x_veh) & ~isnan(y_veh) & ~isinf(x_veh) & ~isinf(y_veh);
+x_veh = x_veh(valid);
+y_veh = y_veh(valid);
+
+scatter(x_veh, y_veh, 15, color_veh, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_veh, p_veh] = corr(x_veh, y_veh);
+p1 = polyfit(x_veh, y_veh, 1);
+x_range = linspace(min(x_veh), max(x_veh), 100);
+plot(x_range, polyval(p1, x_range), 'Color', color_veh, 'LineWidth', 2.5);
+
+% CNO
+x_cno = T_post.speed_cm_s_mean(cno_mask);
+y_cno = T_post.ripple_events(cno_mask);
+valid = ~isnan(x_cno) & ~isnan(y_cno) & ~isinf(x_cno) & ~isinf(y_cno);
+x_cno = x_cno(valid);
+y_cno = y_cno(valid);
+
+scatter(x_cno, y_cno, 15, color_cno, 'filled', 'MarkerFaceAlpha', 0.2);
+[r_cno, p_cno] = corr(x_cno, y_cno);
+p2 = polyfit(x_cno, y_cno, 1);
+x_range = linspace(min(x_cno), max(x_cno), 100);
+plot(x_range, polyval(p2, x_range), 'Color', color_cno, 'LineWidth', 2.5);
+
+ylabel('Ripples/min', 'FontSize', 11);
+title('Ripple Events', 'FontSize', 12, 'FontWeight', 'bold');
+xlim([0 6]); grid on;
+
+fprintf('Ripple Events:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e\n', r_veh, p_veh);
+fprintf('  CNO:     r=%.3f, p=%.4e\n\n', r_cno, p_cno);
+[r_veh_evt, p_veh_evt] = corr(x_veh, y_veh);
+[r_cno_evt, p_cno_evt] = corr(x_cno, y_cno);
+x_veh_evt = x_veh;
+x_cno_evt = x_cno;
+
+%% ADD GRAND TITLE
+sgtitle('Neural Activity vs Speed', 'FontSize', 14, 'FontWeight', 'bold');
+
+%% ADD SHARED X-LABEL (centered annotation)
+annotation('textbox', [0, 0, 1, 0.05], ...
+    'String', 'Animal Speed (cm/s)', ...
+    'FontSize', 12, ...
+    'FontWeight', 'bold', ...
+    'HorizontalAlignment', 'center', ...
+    'VerticalAlignment', 'middle', ...
+    'EdgeColor', 'none', ...
+    'FitBoxToText', 'off');
+
+%% ADD OVERALL LEGEND
+lg = legend({'Vehicle', '', 'CNO', ''}, 'Orientation', 'horizontal', 'Location', 'north');
+lg.Position(2) = 0.88;  % Adjust vertical position
+
+%% SAVE
+saveas(fig, fullfile(output_path, 'NeuralActivity_vs_Speed_Clean.jpg'));
+saveas(fig, fullfile(output_path, 'NeuralActivity_vs_Speed_Clean.png'));
+fprintf('\n Saved: NeuralActivity_vs_Speed_Clean.jpg/png\n');
+
+%% PRINT SUMMARY OF ALL CORRELATIONS
+fprintf('\n================================================================\n');
+fprintf('SUMMARY: Neural Activity vs Speed Correlations (Post-Injection)\n');
+fprintf('================================================================\n\n');
+
+fprintf('THETA POWER vs SPEED:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e (n=%d)\n', r_veh_theta, p_veh_theta, length(x_veh_theta));
+fprintf('  CNO:     r=%.3f, p=%.4e (n=%d)\n\n', r_cno_theta, p_cno_theta, length(x_cno_theta));
+
+fprintf('THETA FREQUENCY vs SPEED:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e (n=%d)\n', r_veh_freq, p_veh_freq, length(x_veh_f));
+fprintf('  CNO:     r=%.3f, p=%.4e (n=%d)\n\n', r_cno_freq, p_cno_freq, length(x_cno_f));
+
+fprintf('RIPPLE POWER vs SPEED:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e (n=%d)\n', r_veh_rip, p_veh_rip, length(x_veh_rip));
+fprintf('  CNO:     r=%.3f, p=%.4e (n=%d)\n\n', r_cno_rip, p_cno_rip, length(x_cno_rip));
+
+fprintf('RIPPLE EVENTS vs SPEED:\n');
+fprintf('  Vehicle: r=%.3f, p=%.4e (n=%d)\n', r_veh_evt, p_veh_evt, length(x_veh_evt));
+fprintf('  CNO:     r=%.3f, p=%.4e (n=%d)\n\n', r_cno_evt, p_cno_evt, length(x_cno_evt));
+
+fprintf('================================================================\n');
+fprintf('Analysis Complete.\n');
+fprintf('================================================================\n');
