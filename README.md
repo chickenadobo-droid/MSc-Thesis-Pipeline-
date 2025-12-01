@@ -6,7 +6,7 @@ This repository contains the complete MATLAB analysis pipeline developed for my 
 
 The core of the analysis involves
 
-i) Behavioural Data Processing; Batch processing of video tracking data to extract animal position, clean artifacts, calculate speed, and define behavioural states based on stringent, data-driven criteria.
+i) Behavioural Data Processing; Batch processing of video tracking data to extract animal position, clean artifacts, calculate speed, and define behavioural states based on stringent, data-driven criteria (see GUI developments for this in "https://github.com/chickenadobo-droid/MSc-Thesis-Pipeline-/wiki/Position-Extraction-Plots-All-Experiments")
 
 ii) Neural Data Extraction; Extraction of neural features like sharp-wave ripple events/power, theta power/frequency and multi-unit activity.
 
