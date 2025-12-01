@@ -1,0 +1,76 @@
+% STANDALONE SCRIPT to add an INJECTION-ALIGNED time vector to data files.
+%
+% This script iterates through all animal and experiment folders, performs
+% the following steps for EACH session:
+%   1. Loads the 'position_artifact_smoothed_speed_classification.mat' file.
+%   2. Reads the 'injection_timestamp_s' value from the struct.
+%   3. Calculates a 'time_inj_aligned_s' vector for the binned data, where
+%      t=0 corresponds to the moment of injection.
+%   4. Saves the entire updated struct to a NEW file:
+%      'position_a_s_sc_inj_aligned.mat'
+
+clear;
+clc;
+close all;
+
+% --- 1. Define the Root Path to Data ---
+data_root_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\RawBehaviouralAnalysis\PositionExtraction';
+
+% --- 2. Set Up Directory and Start Processing Loop ---
+animal_folders = dir(data_root_path);
+animal_folders = animal_folders([animal_folders.isdir] & ~ismember({animal_folders.name},{'.','..'}));
+
+fprintf('=== STARTING SCRIPT TO ADD INJECTION-ALIGNED TIME TO ALL SESSIONS ===\n');
+
+for j = 1:length(animal_folders)
+    current_animal_name = animal_folders(j).name;
+    current_animal_path = fullfile(data_root_path, current_animal_name);
+    fprintf('\n--- Scanning Animal: %s ---\n', current_animal_name);
+    
+    experiment_folders = dir(current_animal_path);
+    experiment_folders = experiment_folders([experiment_folders.isdir] & ~ismember({experiment_folders.name},{'.','..'}));
+    
+    for i = 1:length(experiment_folders)
+        session_name = experiment_folders(i).name;
+        current_experiment_path = fullfile(current_animal_path, session_name);
+        
+        % Define the input and new output file paths
+        input_file = fullfile(current_experiment_path, 'position_artifact_smoothed_speed_classification.mat');
+        output_file = fullfile(current_experiment_path, 'position_a_s_sc_inj_aligned.mat');
+        
+        % Check if the source file exists
+        if exist(input_file, 'file')
+            fprintf('  - Processing session: %s\n', session_name);
+            
+            % Load the existing data
+            load(input_file, 'clean_position');
+            
+            % --- 3. VALIDATION ---
+            % Check if all necessary fields exist before proceeding
+            if isfield(clean_position, 'injection_timestamp_s') && ~isempty(clean_position.injection_timestamp_s) && ~isnan(clean_position.injection_timestamp_s) && isfield(clean_position, 'binned') && isfield(clean_position.binned, 'time_s')
+                
+                % --- 4. Calculate and Add the Injection-Aligned Time Vector ---
+                injection_time = clean_position.injection_timestamp_s;
+                
+                % Subtract the injection timestamp from the binned time vector
+                time_inj_aligned = clean_position.binned.time_s - injection_time;
+                
+                % Add the new field to the struct
+                clean_position.binned.time_inj_aligned_s = time_inj_aligned;
+                
+                % --- 5. Save the Updated Struct to a NEW File ---
+                save(output_file, 'clean_position');
+                fprintf('    -> Created new file with injection-aligned time: %s\n', 'position_a_s_sc_inj_aligned.mat');
+                
+            else
+                fprintf('    -> SKIPPED: Session is missing injection timestamp or binned data.\n');
+            end
+            
+        else
+             fprintf('  - Skipping "%s": source file not found.\n', session_name);
+        end % End of file existence check
+        
+    end % End of experiment loop
+end % End of animal loop
+
+fprintf('\n=== SCRIPT COMPLETE ===\n');
