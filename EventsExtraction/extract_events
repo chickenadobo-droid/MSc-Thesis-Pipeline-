@@ -1,0 +1,36 @@
+function extract_events
+% extracts timestamps of behavioural events marked with a ttl
+
+[data,timestamps,~]=read_neuralynx_file('Events.nev');
+events_data.timestamps=timestamps';
+events_data.ttl=data.ttl';
+events_data.EventStrings=data.EventStrings;
+events_data.event_id=data.Event_ID';
+events_data.extras=data.Extras;
+
+% events_data.EventStrings(i) occured at the corresponding timepoint index in events_data.timestamps(i)
+% event_id == 4 - manually typed free-text
+% event_id == 11 - start/stop recording
+
+if ~exist('events_data','var')
+    disp('Could not extract events data. Missing Events.nev file inside Raw data')
+end
+
+% Build a table
+event_table = table;
+event_table.Index = (1:length(events.timestamps))';
+event_table.Timestamp_us = events.timestamps;
+event_table.EventString = events.EventStrings;
+
+% Convert timestamp to seconds
+event_table.Timestamp_s = event_table.Timestamp_us * 1e-6;
+
+% Save as CSV
+writetable(event_table, 'EventsTable.csv');
+
+% open in MATLAB viewer
+disp(event_table(1:10,:))  % just preview first 10 rows
+
+AbbiOutput = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\Research Project\MATLAB\TetrodeAnalysis\RawAnalysis';
+save(fullfile(AbbiOutput, 'extracted_events.mat'),'events_data','-v7.3');
+end
