@@ -1,0 +1,301 @@
+%%
+load('Final_Table_for_GLM_cleanMUA_NewZ_backup_20251031_121028.mat')
+close all; clc;
+
+% Set publication defaults
+set(0, 'DefaultAxesFontName', 'Arial');
+set(0, 'DefaultAxesFontSize', 10);
+set(0, 'DefaultAxesLineWidth', 1);
+set(0, 'DefaultLineLineWidth', 1.5);
+
+%% Convert variables to categorical
+Final_GLM_Table.AnimalID    = categorical(Final_GLM_Table.AnimalID);
+Final_GLM_Table.SessionName = categorical(Final_GLM_Table.SessionName);
+
+%% Per-session z-scoring (Defining the variables for the "metrics" list)
+% Here we define 'MUA_Z_New' and 'theta_freq_z' using your function
+Final_GLM_Table = zscore_per_session(Final_GLM_Table, ...
+    'MUA_mean_Hz_replicated', 'MUA_Z_New'); 
+
+Final_GLM_Table = zscore_per_session(Final_GLM_Table, ...
+    'theta_freq_weighted_mean_corrected', 'theta_freq_z');
+
+% Final_GLM_Table = zscore_per_session(Final_GLM_Table, ... something broke
+% this variable not sure what!!!
+%     'theta_power_mean_corrected', 'theta_power_z');
+
+%% Create prop_immobile (1 - is_active)
+Final_GLM_Table.prop_immobile = 1 - Final_GLM_Table.is_active;
+
+%% Filter to pre/post
+preData = Final_GLM_Table(Final_GLM_Table.time_min >= -200 & Final_GLM_Table.time_min < 0, :);
+postData = Final_GLM_Table(Final_GLM_Table.time_min > 0 & Final_GLM_Table.time_min <= 60, :);
+
+preData.Epoch = repmat(categorical({'Pre'}), height(preData), 1);
+postData.Epoch = repmat(categorical({'Post'}), height(postData), 1);
+data = [preData; postData];
+
+%% Define metrics
+% Fixed: Removed 'Final_GLM_Table.' prefix and ensured 3 columns for all rows
+metrics = {
+    'ripple_events',                       'Ripple Events (Per Minute)',      'positive';
+    'ripple_power_z',                      'Ripple Power (Z-Scored)',         'positive';
+    'theta_freq_weighted_mean_corrected',  'Theta Frequency (Hz)',            'negative';
+    'theta_freq_z',                        'Theta Frequency (Z-Scored)',      'negative'; 
+    'MUA_Z_New',                           'Multi-Unit Activity (Z-Scored)',  'negative';
+};
+
+conditions = {'Vehicle', 'CNO'};
+epochs = {'Pre', 'Post'};
+colors = struct('Vehicle', [0 0.4470 0.7410], 'CNO', [0.8500 0.3250 0.0980]);
+
+%% Store results
+results = table();
+
+%% Plot each metric (Publication Style, Matching Speed Plots)
+for m = 1:size(metrics, 1)
+    metric = metrics{m, 1};
+    metricLabel = metrics{m, 2};
+    
+    figure('Position', [100 100 600 500], 'Color', 'w');
+    sgtitle([metricLabel ' vs Immobility'], ...
+        'FontSize', 12, 'FontWeight', 'bold', 'FontName', 'Arial');
+    
+    plotIdx = 0;
+    for c = 1:2
+        cond = conditions{c};
+        for e = 1:2
+            ep = epochs{e};
+            plotIdx = plotIdx + 1;
+            subplot(2, 2, plotIdx);
+            
+            subset = data(data.Condition == cond & data.Epoch == categorical({ep}), :);
+            
+            % Check if column exists to avoid crashing
+            if ~ismember(metric, subset.Properties.VariableNames)
+                warning('Variable %s not found in table.', metric);
+                continue;
+            end
+            
+            subset = subset(~isnan(subset.(metric)) & ~isnan(subset.prop_immobile), :);
+            
+            if height(subset) > 10
+                % Scatter
+                scatter(subset.prop_immobile, subset.(metric), ...
+                    12, colors.(cond), 'filled', 'MarkerFaceAlpha', 0.35);
+                hold on;
+                
+                % Fit regression model
+                mdl = fitlm(subset, [metric ' ~ prop_immobile']);
+                
+                % Regression line + CI
+                xRange = table(linspace(0, 1, 100)', 'VariableNames', {'prop_immobile'});
+                [yPred, yCI] = predict(mdl, xRange);
+                
+                fill([xRange.prop_immobile; flipud(xRange.prop_immobile)], ...
+                     [yCI(:,1); flipud(yCI(:,2))], colors.(cond), ...
+                     'FaceAlpha', 0.1, 'EdgeColor', 'none');
+                plot(xRange.prop_immobile, yPred, ...
+                    'Color', colors.(cond), 'LineWidth', 2);
+                
+                % Labels & formatting
+                xlabel('Proportion Immobile');
+                ylabel(metricLabel);
+                title([cond '-' ep], 'FontWeight', 'bold');
+                
+                % Format p-value nicely
+                pval = mdl.Coefficients.pValue(2);
+                slope = mdl.Coefficients.Estimate(2);
+                
+                if pval < 0.001
+                    pStr = 'p < 0.001';
+                elseif pval < 0.01
+                    pStr = sprintf('p = %.3f', pval);
+                else
+                    pStr = sprintf('p = %.2f', pval);
+                end
+                
+                text(0.95, 0.95, ...
+                     {sprintf('β = %.3f', slope), pStr}, ...
+                     'Units', 'normalized', ...
+                     'HorizontalAlignment', 'right', ...
+                     'VerticalAlignment', 'top', ...
+                     'FontSize', 9, 'FontName', 'Arial');
+                
+                % Aesthetics
+                box off;
+                set(gca, 'TickDir', 'out');
+                hold off;
+                
+                % Store results
+                newRow = table();
+                newRow.Metric = {metricLabel};
+                newRow.Condition = {cond};
+                newRow.Epoch = {ep};
+                newRow.Slope = slope;
+                newRow.SE = mdl.Coefficients.SE(2);
+                newRow.pValue = pval;
+                newRow.R2 = mdl.Rsquared.Ordinary;
+                newRow.N = height(subset);
+                results = [results; newRow];
+            else
+                title([cond ' – ' ep ' (insufficient data)'], 'FontWeight', 'bold');
+            end
+        end
+    end
+end
+disp(results);
+
+%% Speed vs Theta/MUA analysis regression
+
+% Publication Aesthetics
+set(0, 'DefaultAxesFontName', 'Arial');
+set(0, 'DefaultAxesFontSize', 10);
+set(0, 'DefaultAxesLineWidth', 1);
+set(0, 'DefaultLineLineWidth', 1.5);
+
+%% 1. PREPARE DATA
+Final_GLM_Table.AnimalID    = categorical(Final_GLM_Table.AnimalID);
+Final_GLM_Table.SessionName = categorical(Final_GLM_Table.SessionName);
+
+% Create Z-scored variables using the ROBUST function
+% (This ensures artifacts don't ruin the correlation)
+Final_GLM_Table = zscore_per_session(Final_GLM_Table, 'theta_freq_weighted_mean_corrected', 'theta_freq_z');
+Final_GLM_Table = zscore_per_session(Final_GLM_Table, 'theta_power_mean_corrected', 'theta_power_z');
+Final_GLM_Table = zscore_per_session(Final_GLM_Table, 'MUA_mean_Hz_replicated', 'MUA_Z_New');
+
+%% 2. FILTER DATA (Pre vs Post)
+preData = Final_GLM_Table(Final_GLM_Table.time_min >= -200 & Final_GLM_Table.time_min < 0, :);
+postData = Final_GLM_Table(Final_GLM_Table.time_min > 0 & Final_GLM_Table.time_min <= 60, :);
+
+preData.Epoch = repmat(categorical({'Pre'}), height(preData), 1);
+postData.Epoch = repmat(categorical({'Post'}), height(postData), 1);
+data = [preData; postData];
+
+%% 3. DEFINE MOVEMENT METRICS
+% Metrics expected to correlate with Speed
+metrics = {
+    'theta_freq_z',   'Theta Freq (Z-Scored)',   'positive'; % Speed-VCO (velocity controlled oscillator)
+    'theta_power_z',  'Theta Power (Z-Scored)',  'positive'; % Running usually increases power
+    'MUA_Z_New',      'MUA (Z-Scored)',          'positive'; % Running increases firing rates
+};
+
+conditions = {'Vehicle', 'CNO'};
+epochs = {'Pre', 'Post'};
+colors = struct('Vehicle', [0 0.4470 0.7410], 'CNO', [0.8500 0.3250 0.0980]);
+
+%% 4. PLOT: METRIC vs SPEED (Active States Only)
+for m = 1:size(metrics, 1)
+    metric = metrics{m, 1};
+    metricLabel = metrics{m, 2};
+    
+    figure('Position', [100 100 600 500], 'Color', 'w');
+    sgtitle([metricLabel ' vs Running Speed'], 'FontSize', 12, 'FontWeight', 'bold');
+    
+    plotIdx = 0;
+    for c = 1:2
+        cond = conditions{c};
+        for e = 1:2
+            ep = epochs{e};
+            plotIdx = plotIdx + 1;
+            subplot(2, 2, plotIdx);
+            
+            % Filter for Condition + Epoch
+            subset = data(data.Condition == cond & data.Epoch == categorical({ep}), :);
+            
+            % === CRITICAL FILTER: MOVING STATES ONLY ===
+            % We only care about the Speed/Theta relationship when the animal is actually moving.
+            % Depending on how 'is_active' is defined (0 or 1), use:
+            subset = subset(subset.is_active == 1, :); 
+            
+            % Remove NaNs
+            subset = subset(~isnan(subset.(metric)) & ~isnan(subset.speed_z_px_s), :);
+            
+            % === SIGMA CLIPPING (Artifact Removal) ===
+            % Remove Z-scores > 5 (artifacts) to clean the regression
+            subset = subset(abs(subset.(metric)) <= 5, :);
+            % Also remove impossible speeds (optional, e.g., > 10 SD)
+            subset = subset(abs(subset.speed_z_px_s) <= 10, :);
+            
+            if height(subset) > 10
+                % Scatter Plot (Speed on X-axis)
+                scatter(subset.speed_z_px_s, subset.(metric), ...
+                    12, colors.(cond), 'filled', 'MarkerFaceAlpha', 0.35);
+                hold on;
+                
+                % Fit Regression: Metric ~ Speed
+                mdl = fitlm(subset, [metric ' ~ speed_z_px_s']);
+                
+                % Plot Line + CI
+                xRange = table(linspace(min(subset.speed_z_px_s), max(subset.speed_z_px_s), 100)', ...
+                               'VariableNames', {'speed_z_px_s'});
+                [yPred, yCI] = predict(mdl, xRange);
+                
+                fill([xRange.speed_z_px_s; flipud(xRange.speed_z_px_s)], ...
+                     [yCI(:,1); flipud(yCI(:,2))], colors.(cond), ...
+                     'FaceAlpha', 0.1, 'EdgeColor', 'none');
+                plot(xRange.speed_z_px_s, yPred, ...
+                    'Color', colors.(cond), 'LineWidth', 2);
+                
+                % Labels
+                xlabel('Running Speed (Z-Scored)');
+                ylabel(metricLabel);
+                title([cond '-' ep], 'FontWeight', 'bold');
+                
+                % Stats Display
+                slope = mdl.Coefficients.Estimate(2);
+                pval = mdl.Coefficients.pValue(2);
+                if pval < 0.001, pStr = 'p < 0.001'; else, pStr = sprintf('p=%.3f', pval); end
+                
+                text(0.05, 0.95, {sprintf('β=%.3f', slope), pStr}, ...
+                     'Units', 'normalized', 'VerticalAlignment', 'top', 'FontSize', 9);
+                
+                box off; set(gca, 'TickDir', 'out'); hold off;
+            else
+                title([cond '-' ep ' (No Data)']);
+            end
+        end
+    end
+end
+
+%%  Z-SCORE FUNCTION
+function T = zscore_per_session(T, varName, outName)
+    T.(outName) = NaN(height(T),1);
+    if ~iscategorical(T.AnimalID), T.AnimalID = categorical(T.AnimalID); end
+    if ~iscategorical(T.SessionName), T.SessionName = categorical(T.SessionName); end
+    
+    animals  = categories(T.AnimalID);
+    sessions = categories(T.SessionName);
+    
+    fprintf('Processing %s... ', varName);
+    
+    for a = 1:numel(animals)
+        for s = 1:numel(sessions)
+            idx = T.AnimalID == animals{a} & T.SessionName == sessions{s};
+            if nnz(idx) == 0, continue; end
+            
+            % 1. Extract Raw Data
+            rawData = T.(varName)(idx);
+            
+            % 2. Robust Artifact Removal (IQR > 5)
+            [isArtifact, ~] = isoutlier(rawData, 'quartiles', 'ThresholdFactor', 5);
+            cleanData = rawData;
+            cleanData(isArtifact) = NaN;
+            
+            % 3. Define Baseline (-200 to 0)
+            sessionTimes = T.time_min(idx);
+            pre = sessionTimes >= -200 & sessionTimes < 0;
+            baselineData = cleanData(pre);
+            
+            if sum(~isnan(baselineData)) < 10, continue; end
+            
+            % 4. Calc Stats & Z-Score
+            mu = mean(baselineData, 'omitnan');
+            sigma = std(baselineData, 'omitnan');
+            if sigma == 0, sigma = 1; end
+            
+            T.(outName)(idx) = (cleanData - mu) ./ sigma;
+        end
+    end
+    fprintf('Done.\n');
+end
