@@ -1,13 +1,13 @@
-%% GRAND UNIFIED PSD ANALYSIS SCRIPT - 1 Hz RESOLUTION
-% 071225
-% Updated: nfft = 32000 for 1 Hz frequency resolution
+%% PSD ANALYSIS SCRIPT
+% 
+% nfft = 32000 for 1 Hz frequency resolution
 % Uses memory-efficient time-window loading
 % Pre window: -60 to 0 min
 % Post window: 0 to 60 min
 %
 clc; clear; close all;
 fprintf('============================================================\n');
-fprintf('STARTING GRAND UNIFIED PSD ANALYSIS (1 Hz Resolution)\n');
+fprintf('STARTING PSD ANALYSIS \n');
 fprintf('============================================================\n\n');
 
 %% --- HELPER FUNCTION ---
