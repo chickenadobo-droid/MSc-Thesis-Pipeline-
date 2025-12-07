@@ -1,0 +1,282 @@
+%% Compare GLME vs ANOVA approach
+clc; close all; clear all;
+load('Final_Table_for_GLM_cleanMUA_NewZ.mat')
+
+%% 1. Plot distributions for each condition × time window
+figure('Position', [100 100 1200 800], 'Color', 'w');
+
+timeWindows = {
+    [-60, 0],   'Pre'
+    [0, 60],    '0-1 hr'
+    [60, 120],  '1-2 hr'
+    [120, 300], '2-5 hr'
+};
+
+for w = 1:4
+    tStart = timeWindows{w, 1}(1);
+    tEnd = timeWindows{w, 1}(2);
+    windowLabel = timeWindows{w, 2};
+    
+    if tStart < 0
+        windowIdx = Final_GLM_Table.time_min >= tStart & Final_GLM_Table.time_min < tEnd;
+    else
+        windowIdx = Final_GLM_Table.time_min > tStart & Final_GLM_Table.time_min <= tEnd;
+    end
+    
+    windowData = Final_GLM_Table(windowIdx, :);
+    
+    vehSpeed = windowData.speed_z_px_s(windowData.Condition == 'Vehicle');
+    cnoSpeed = windowData.speed_z_px_s(windowData.Condition == 'CNO');
+    
+    subplot(2, 4, w);
+    histogram(vehSpeed, 30, 'FaceColor', [0.2 0.4 0.8], 'FaceAlpha', 0.5, 'EdgeColor', 'none');
+    hold on;
+    histogram(cnoSpeed, 30, 'FaceColor', [0.9 0.3 0.2], 'FaceAlpha', 0.5, 'EdgeColor', 'none');
+    xlabel('Speed (Z-Scored)');
+    ylabel('Count');
+    title(windowLabel);
+    legend({'Vehicle', 'CNO'}, 'Box', 'off');
+    box off;
+    
+    % QQ plot
+    subplot(2, 4, w + 4);
+    qqplot(vehSpeed);
+    hold on;
+    title([windowLabel ' - QQ Plot (Vehicle)']);
+end
+
+sgtitle('Speed Distributions by Time Window');
+
+%% 2. Check raw vs z-scored scatter
+figure('Position', [100 100 1000 400], 'Color', 'w');
+
+subplot(1,2,1);
+scatter(Final_GLM_Table.time_min(Final_GLM_Table.Condition == 'Vehicle'), ...
+    Final_GLM_Table.speed_z_px_s(Final_GLM_Table.Condition == 'Vehicle'), 5, 'b', 'filled', 'MarkerFaceAlpha', 0.1);
+hold on;
+scatter(Final_GLM_Table.time_min(Final_GLM_Table.Condition == 'CNO'), ...
+    Final_GLM_Table.speed_z_px_s(Final_GLM_Table.Condition == 'CNO'), 5, 'r', 'filled', 'MarkerFaceAlpha', 0.1);
+xlabel('Time (min)');
+ylabel('Speed (z-scored)');
+title('Z-scored speed');
+xlim([-60 300]);
+
+subplot(1,2,2);
+scatter(Final_GLM_Table.time_min(Final_GLM_Table.Condition == 'Vehicle'), ...
+    Final_GLM_Table.speed_raw_px_s(Final_GLM_Table.Condition == 'Vehicle'), 5, 'b', 'filled', 'MarkerFaceAlpha', 0.1);
+hold on;
+scatter(Final_GLM_Table.time_min(Final_GLM_Table.Condition == 'CNO'), ...
+    Final_GLM_Table.speed_raw_px_s(Final_GLM_Table.Condition == 'CNO'), 5, 'r', 'filled', 'MarkerFaceAlpha', 0.1);
+xlabel('Time (min)');
+ylabel('Speed (raw px/s)');
+title('Raw speed (px/s)');
+xlim([-60 300]);
+
+%% 3. Animal-Level ANOVA (The Correct Approach)
+fprintf('\n========== ANIMAL-LEVEL ANOVA (Correct N) ==========\n\n');
+
+% 1. Aggregate to Session Level first (as before)
+sessions = unique(Final_GLM_Table.SessionName);
+sessionData = table();
+
+for s = 1:length(sessions)
+    if iscell(sessions), sess = sessions{s}; else, sess = sessions(s); end
+    sessIdx = strcmp(string(Final_GLM_Table.SessionName), string(sess));
+    thisSess = Final_GLM_Table(sessIdx, :);
+    
+    if height(thisSess) < 10, continue; end % Skip empty sessions
+    
+    animal = string(thisSess.AnimalID(1));
+    cond = string(thisSess.Condition(1));
+    
+    for w = 1:4
+        tStart = timeWindows{w, 1}(1);
+        tEnd = timeWindows{w, 1}(2);
+        wLabel = timeWindows{w, 2};
+        
+        % Get mean for this specific window in this session
+        wIdx = thisSess.time_min > tStart & thisSess.time_min <= tEnd;
+        if sum(wIdx) > 0
+            mSpeed = mean(thisSess.speed_z_px_s(wIdx), 'omitnan');
+            
+            % Store
+            newRow = table();
+            newRow.Animal = animal;
+            newRow.Condition = categorical(cond);
+            newRow.Window = categorical({wLabel});
+            newRow.MeanSpeed = mSpeed;
+            sessionData = [sessionData; newRow];
+        end
+    end
+end
+
+% 2. Aggregate to animal Level (Average their sessions together)
+% This ensures N = Number of Animals
+animalMeans = varfun(@mean, sessionData, ...
+    'InputVariables', 'MeanSpeed', ...
+    'GroupingVariables', {'Animal', 'Condition', 'Window'});
+
+fprintf('Number of Animals included: %d\n', length(unique(animalMeans.Animal)));
+
+% 3. Run ANOVA on Animal Means
+[p, tbl, stats] = anovan(animalMeans.mean_MeanSpeed, ...
+    {animalMeans.Condition, animalMeans.Window}, ...
+    'model', 'interaction', 'varnames', {'Condition', 'TimeWindow'});
+
+fprintf('\nANOVA Results (Animal Level):\n');
+fprintf('Condition: F = %.2f, p = %.4f\n', tbl{2,6}, tbl{2,7});
+fprintf('Time Window: F = %.2f, p = %.4f\n', tbl{3,6}, tbl{3,7});
+fprintf('Interaction: F = %.2f, p = %.4f\n', tbl{4,6}, tbl{4,7});
+
+%% 4. T-Tests on Animal Means (Post-hoc)
+fprintf('\n========== T-TESTS (Animal N) ==========\n');
+windows = unique(animalMeans.Window);
+
+for w = 1:length(windows)
+    wLabel = string(windows(w));
+    if wLabel == "Pre", continue; end % Skip pre-injection for stats
+    
+    wData = animalMeans(animalMeans.Window == wLabel, :);
+    
+    veh = wData.mean_MeanSpeed(wData.Condition == 'Vehicle');
+    cno = wData.mean_MeanSpeed(wData.Condition == 'CNO');
+    
+    [~, p, ~, stats] = ttest2(veh, cno);
+    
+    fprintf('%s: Vehicle(n=%d) = %.2f ± %.2f, CNO(n=%d) = %.2f ± %.2f\n', ...
+        wLabel, length(veh), mean(veh), std(veh)/sqrt(length(veh)), ...
+        length(cno), mean(cno), std(cno)/sqrt(length(cno)));
+    fprintf('      t(%d) = %.2f, p = %.4f\n', stats.df, stats.tstat, p);
+end
+
+%% PLOT: Animal-Level Speed (Colored Connecting Lines)
+figure('Position', [100 100 800 600], 'Color', 'w');
+hold on;
+
+% --- 1. Settings ---
+windowsToAnalysis = {'0-1 hr', '1-2 hr', '2-5 hr'};
+nWins = length(windowsToAnalysis);
+groupOffset = 0.2; 
+barWidth = 0.35;
+
+% Classic "Scientific" Standard (High Contrast)
+stdBlue = [0 0.5 1];       % Vehicle: Pure Blue
+stdRed  = [0.83 0.14 0.14];     % CNO: Pure Red
+
+% Unique Colors for Individual Animals (Dots & Lines)
+% distinct from the Blue/Red bars
+animalColorsList = [
+    0.29 0.29 0.29 ; % Animal 1: Black
+    0.49 0.18 0.56; % Animal 2: Purple
+    0.47 0.67 0.19; % Animal 3: Green
+    0.93 0.69 0.13  % Animal 4: Gold/Yellow
+];
+
+uniqueAnimals = unique(animalMeans.Animal);
+animalHandles = gobjects(length(uniqueAnimals), 1); 
+
+% --- 2. Loop Through Time Windows ---
+for w = 1:nWins
+    wLabel = windowsToAnalysis{w};
+    xCenter = w;
+    
+    % Filter Data
+    wData = animalMeans(animalMeans.Window == wLabel, :);
+    vData = wData(wData.Condition == 'Vehicle', :);
+    cData = wData(wData.Condition == 'CNO', :);
+    
+    % Means & SEM
+    vMean = mean(vData.mean_MeanSpeed, 'omitnan');
+    cMean = mean(cData.mean_MeanSpeed, 'omitnan');
+    vSEM  = std(vData.mean_MeanSpeed, 'omitnan') / sqrt(height(vData));
+    cSEM  = std(cData.mean_MeanSpeed, 'omitnan') / sqrt(height(cData));
+    
+    % --- A. Plot Bars (Background) ---
+    % Used lighter FaceAlpha so the dark dots/lines stand out
+    bar(xCenter - groupOffset, vMean, barWidth, ...
+        'FaceColor', stdBlue, 'EdgeColor', 'none', 'FaceAlpha', 0.4);
+    bar(xCenter + groupOffset, cMean, barWidth, ...
+        'FaceColor', stdRed, 'EdgeColor', 'none', 'FaceAlpha', 0.4);
+    
+    % --- B. Plot Error Bars ---
+    errorbar(xCenter - groupOffset, vMean, vSEM, 'k', 'LineWidth', 1.5, 'CapSize', 8, 'LineStyle', 'none');
+    errorbar(xCenter + groupOffset, cMean, cSEM, 'k', 'LineWidth', 1.5, 'CapSize', 8, 'LineStyle', 'none');
+    
+    % --- C. Plot Paired Lines & Individual Points ---
+    for i = 1:length(uniqueAnimals)
+        thisAnimal = uniqueAnimals(i);
+        
+        % Get this animal's color
+        % Loop through colors if > 4 animals
+        colIdx = mod(i-1, size(animalColorsList,1)) + 1;
+        thisColor = animalColorsList(colIdx, :);
+        
+        yVeh = vData.mean_MeanSpeed(vData.Animal == thisAnimal);
+        yCNO = cData.mean_MeanSpeed(cData.Animal == thisAnimal);
+        
+        if ~isempty(yVeh) && ~isempty(yCNO)
+            
+            % 1. Draw Connecting Line (Matched to Animal Color)
+            plot([xCenter - groupOffset, xCenter + groupOffset], ...
+                 [yVeh, yCNO], ...
+                 '-', 'Color', [thisColor, 0.7], 'LineWidth', 1.5); 
+             
+            % 2. Vehicle Dot
+            h = scatter(xCenter - groupOffset, yVeh, 60, ...
+                thisColor, 'filled', 'MarkerEdgeColor', 'w', 'LineWidth', 0.5);
+            
+            if ~isvalid(animalHandles(i)), animalHandles(i) = h; end
+            
+            % 3. CNO Dot
+            scatter(xCenter + groupOffset, yCNO, 60, ...
+                thisColor, 'filled', 'MarkerEdgeColor', 'w', 'LineWidth', 0.5);
+        end
+    end
+end
+
+% --- 3. Formatting & Stars ---
+set(gca, 'XTick', 1:nWins, 'XTickLabel', windowsToAnalysis, ...
+    'FontName', 'Arial', 'FontSize', 12, 'LineWidth', 1.2);
+ylabel('Speed (Z-Score)', 'FontWeight', 'bold');
+xlabel('Time Since Injection (Hours)')
+sgtitle('Effect of CNO on Locomotor Speed Over Time')
+yline(0, '-', 'Color', [0.4 0.4 0.4]); 
+title('')
+xlim([0.4 3.6]);
+
+% Significance Stars (0-1 hr *)
+maxY_1 = max(animalMeans.mean_MeanSpeed(animalMeans.Window=='0-1 hr'));
+lineH_1 = maxY_1 + 0.2;
+line([1-groupOffset, 1+groupOffset], [lineH_1 lineH_1], 'Color', 'k', 'LineWidth', 1.5);
+text(1, lineH_1 + 0.05, '*', 'FontSize', 16, 'HorizontalAlignment', 'center');
+
+% Significance Stars (2-5 hr *)
+maxY_3 = max(animalMeans.mean_MeanSpeed(animalMeans.Window=='2-5 hr'));
+lineH_3 = maxY_3 + 0.2;
+line([3-groupOffset, 3+groupOffset], [lineH_3 lineH_3], 'Color', 'k', 'LineWidth', 1.5);
+text(3, lineH_3 + 0.05, '*', 'FontSize', 16, 'HorizontalAlignment', 'center');
+
+% --- 4. Legend ---
+% Dummy bars for legend color
+hB1 = bar(NaN, NaN, 'FaceColor', stdBlue, 'FaceAlpha', 0.4);
+hB2 = bar(NaN, NaN, 'FaceColor', stdRed, 'FaceAlpha', 0.4);
+
+legHandles = [hB1, hB2];
+legLabels = {'Vehicle', 'CNO'};
+
+validAnim = animalHandles(isgraphics(animalHandles));
+legHandles = [legHandles; validAnim];
+for k = 1:length(validAnim)
+    legLabels{end+1} = char(uniqueAnimals(k)); 
+end
+
+legend(legHandles, legLabels, 'Location', 'northeastoutside', 'Box', 'off');
+
+% Despine
+box off;
+set(gca, 'TickDir', 'out');
+ax = gca; ax.Box = 'off';
+axes(ax);
+line(xlim, [ylim(1) ylim(1)], 'Color', 'k', 'LineWidth', 1.2); 
+line([xlim(1) xlim(1)], ylim, 'Color', 'k', 'LineWidth', 1.2); 
+hold off;
