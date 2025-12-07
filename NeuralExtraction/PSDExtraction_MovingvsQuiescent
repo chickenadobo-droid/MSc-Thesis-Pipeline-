@@ -1,54 +1,14 @@
-%% GRAND UNIFIED PSD ANALYSIS - MEMORY-EFFICIENT WITH 1/f CORRECTION
-%
-% This version:
-% - Loads only needed time segments (memory-efficient)
-% - Applies 1/f normalization to remove pink noise
-% - Creates comprehensive plots: CNO vs Vehicle x Moving vs Quiescent
+%% GRAND UNIFIED PSD ANALYSIS SCRIPT - 1 Hz RESOLUTION
+% 071225
+% Updated: nfft = 32000 for 1 Hz frequency resolution
+% Uses memory-efficient time-window loading
+% Pre window: -60 to 0 min
+% Post window: 0 to 60 min
 %
 clc; clear; close all;
 fprintf('============================================================\n');
-fprintf('GRAND UNIFIED PSD ANALYSIS - FULL VERSION\n');
+fprintf('STARTING GRAND UNIFIED PSD ANALYSIS (1 Hz Resolution)\n');
 fprintf('============================================================\n\n');
-
-%% --- SETUP ---
-addpath('D:\Extras\NeuralynxMatlabImportExport_v6.1.0\Neuralynx_mex_only');
-fprintf('✓ Added Neuralynx loaders\n');
-
-load('Final_Table_for_GLM_cleanMUA_NewZ.mat', 'Final_GLM_Table');
-inj_table = readtable('Injection_Times.csv');
-fprintf('✓ Loaded metadata\n\n');
-
-%% --- CONFIGURATION ---
-Fs = 32000;
-nfft = 4096;
-window = hanning(nfft);
-overlap = nfft/2;
-
-moving_states = {'Moving'};
-quiescent_states = {'Sleep', 'Still'};
-
-conditions = {'CNO', 'Vehicle'};
-periods = {'Pre', 'Post'};
-states = {'Moving', 'Quiescence'};
-
-% Storage
-for c = 1:length(conditions)
-    for p = 1:length(periods)
-        for s = 1:length(states)
-            data_store.(conditions{c}).(periods{p}).(states{s}) = [];
-        end
-    end
-end
-
-problem_sessions = {'mouseD12_050213_Day6_PBS', 'mouseD12_050913_Day7_CNO'};
-unique_sessions = unique(Final_GLM_Table.SessionName);
-unique_sessions = setdiff(unique_sessions, problem_sessions);
-n_sessions = length(unique_sessions);
-
-fprintf('Found %d sessions to analyse\n\n', n_sessions);
-
-success_count = 0;
-fail_log = {};
 
 %% --- HELPER FUNCTION ---
 function lfp_segments = load_time_windows(lfp_file, target_minutes, inj_time_s)
@@ -58,7 +18,6 @@ function lfp_segments = load_time_windows(lfp_file, target_minutes, inj_time_s)
         t_start_s = inj_time_s + (t_min_start * 60);
         t_end_s = t_start_s + 60;
         time_range_usec = [t_start_s * 1e6, t_end_s * 1e6];
-
         try
             [~, samples] = Nlx2MatCSC(lfp_file, [1 0 0 0 1], 0, 4, time_range_usec);
             chunk = reshape(samples, 1, numel(samples));
@@ -72,80 +31,153 @@ function lfp_segments = load_time_windows(lfp_file, target_minutes, inj_time_s)
     end
 end
 
-%% --- MAIN LOOP ---
+%% --- 1. SETUP PATHS & LOAD METADATA ---
+nlx_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis\NeuralynxMatlabImportExport_v6.1.0';
+if exist(nlx_path, 'dir')
+    addpath(genpath(nlx_path));
+    fprintf('Added Neuralynx loaders to path.\n');
+else
+    warning('Neuralynx loaders not found at %s', nlx_path);
+end
+
+fprintf('Loading GLM Table...\n');
+load('Final_Table_for_GLM_cleanMUA_NewZ.mat', 'Final_GLM_Table');
+
+fprintf('Loading Injection Times...\n');
+inj_table = readtable('Injection_Times.csv');
+fprintf('Metadata loaded.\n\n');
+
+%% --- 2. CONFIGURATION ---
+% PSD Parameters
+Fs = 32000;           % Sampling rate
+nfft = 32000;         % 1 Hz resolution
+window = hanning(nfft);
+overlap = nfft/2;
+
+% Time windows (in minutes relative to injection)
+PRE_WINDOW = [-60 0];
+POST_WINDOW = [0 60];
+
+fprintf('Pre window: %d to %d min\n', PRE_WINDOW(1), PRE_WINDOW(2));
+fprintf('Post window: %d to %d min\n\n', POST_WINDOW(1), POST_WINDOW(2));
+
+% Preferred channel order
+PREFERRED_CHANNELS = {'CSC6.ncs', 'CSC1.ncs', 'CSC2.ncs', 'CSC3.ncs'};
+
+% Define Behavioral States
+moving_states = {'Moving'};
+quiescent_states = {'Sleep', 'Still'};
+
+% Pre-allocate storage
+conditions = {'CNO', 'Vehicle'};
+periods = {'Pre', 'Post'};
+states = {'Moving', 'Quiescence'};
+
+for c = 1:length(conditions)
+    for p = 1:length(periods)
+        for s = 1:length(states)
+            data_store.(conditions{c}).(periods{p}).(states{s}) = [];
+        end
+    end
+end
+
+% Get list of good sessions
+problem_sessions = {'mouseD12_050213_Day6_PBS', 'mouseD12_050913_Day7_CNO'};
+unique_sessions = unique(Final_GLM_Table.SessionName);
+unique_sessions = setdiff(unique_sessions, problem_sessions);
+
+%% --- TEST MODE ---
+% unique_sessions = unique_sessions(1:2);  % REMOVE AFTER TESTING
+
+n_sessions = length(unique_sessions);
+fprintf('Processing %d sessions\n\n', n_sessions);
+
+success_count = 0;
+fail_log = {};
+
+%% --- 3. MAIN LOOP ---
 for i = 1:n_sessions
     sess_name = unique_sessions{i};
     fprintf('[%d/%d] %s\n', i, n_sessions, sess_name);
-
-    % Get metadata
+    
+    % A. Get Metadata
     sess_mask = strcmp(Final_GLM_Table.SessionName, sess_name);
     T_sess = Final_GLM_Table(sess_mask, :);
     animal_id = char(T_sess.AnimalID(1));
     condition = char(T_sess.Condition(1));
     if contains(condition, 'PBS'), condition = 'Vehicle'; end
-
-    % Get injection time
+    
+    % Get Injection Time
     inj_idx = strcmp(inj_table.SessionName, sess_name);
     if ~any(inj_idx)
-        fprintf('  ⚠ No injection time\n');
+        fprintf('  No injection time. Skipping.\n');
         fail_log{end+1} = {sess_name, 'No injection time'};
         continue;
     end
     inj_time_s = inj_table.Timestamp_s(inj_idx);
-
-    % Find LFP file
+    
+    % B. Find LFP file
     base_dir = fullfile('D:\', animal_id, sess_name);
-    search_dirs = {fullfile(base_dir, 'raw'), base_dir};
-
     lfp_file = [];
-    for s = 1:length(search_dirs)
-        if exist(search_dirs{s}, 'dir')
-            ncs_files = dir(fullfile(search_dirs{s}, 'CSC6.ncs'));
-            if isempty(ncs_files)
-                ncs_files = dir(fullfile(search_dirs{s}, '*.ncs'));
-            end
-            if ~isempty(ncs_files)
-                lfp_file = fullfile(search_dirs{s}, ncs_files(1).name);
+    search_order = {fullfile(base_dir, 'raw'), base_dir};
+    
+    for search_idx = 1:length(search_order)
+        search_dir = search_order{search_idx};
+        if exist(search_dir, 'dir')
+            csc_files = dir(fullfile(search_dir, '*.ncs'));
+            if ~isempty(csc_files)
+                for pref_idx = 1:length(PREFERRED_CHANNELS)
+                    file_idx = find(strcmpi({csc_files.name}, PREFERRED_CHANNELS{pref_idx}));
+                    if ~isempty(file_idx)
+                        lfp_file = fullfile(search_dir, csc_files(file_idx(1)).name);
+                        fprintf('  -> %s\n', csc_files(file_idx(1)).name);
+                        break;
+                    end
+                end
+                if isempty(lfp_file)
+                    lfp_file = fullfile(search_dir, csc_files(1).name);
+                end
                 break;
             end
         end
     end
-
+    
     if isempty(lfp_file)
-        fprintf('  ⚠ No LFP file\n');
-        fail_log{end+1} = {sess_name, 'No LFP file'};
+        fprintf('  No .ncs files. Skipping.\n');
+        fail_log{end+1} = {sess_name, 'No .ncs files'};
         continue;
     end
-
-    % Process each condition
+    
+    % C. Process each period and state
     session_has_data = false;
-
+    
     for p_idx = 1:length(periods)
         period = periods{p_idx};
-
+        
         for s_idx = 1:length(states)
             state_name = states{s_idx};
-
-            % Get target minutes
+            
+            % Get behavioral state mask
             if strcmp(state_name, 'Moving')
                 state_mask = ismember(T_sess.BehaviouralState, moving_states);
             else
                 state_mask = ismember(T_sess.BehaviouralState, quiescent_states);
             end
-
+            
+            % Get time mask
             if strcmp(period, 'Pre')
-                time_mask = T_sess.time_min < 0;
+                time_mask = T_sess.time_min >= PRE_WINDOW(1) & T_sess.time_min < PRE_WINDOW(2);
             else
-                time_mask = T_sess.time_min >= 0 & T_sess.time_min <= 60;
+                time_mask = T_sess.time_min >= POST_WINDOW(1) & T_sess.time_min <= POST_WINDOW(2);
             end
-
+            
             target_minutes = T_sess.time_min(state_mask & time_mask);
-
+            
             if isempty(target_minutes), continue; end
-
-            % Load only these specific time windows
+            
+            % Load only needed time windows
             lfp_segments = load_time_windows(lfp_file, target_minutes, inj_time_s);
-
+            
             % Compute PSD
             if length(lfp_segments) > Fs * 2
                 [psd, freq] = pwelch(lfp_segments, window, overlap, nfft, Fs);
@@ -155,345 +187,271 @@ for i = 1:n_sessions
             end
         end
     end
-
+    
     if session_has_data
-        fprintf('  ✓\n');
+        fprintf('  Success\n');
         success_count = success_count + 1;
     else
-        fprintf('  ⚠ No data\n');
-        fail_log{end+1} = {sess_name, 'No valid data'};
+        fprintf('  No valid data\n');
+        fail_log{end+1} = {sess_name, 'No valid segments'};
     end
 end
 
-fprintf('\n✓ Processed %d/%d sessions\n\n', success_count, n_sessions);
-
-%% --- APPLY 1/f NORMALISATION ---
-fprintf('Applying 1/f normalisation...\n');
-
-% Function to normalize by 1/f
-function psd_norm = normalize_1f(psd, freq)
-    % Multiply by frequency to remove 1/f trend
-    psd_norm = psd .* freq(:);
-end
-
-%% --- PLOT RESULTS ---
-if success_count > 0
-    fprintf('Generating plots...\n');
-
-    % Create 2x2 figure: CNO vs Vehicle x Moving vs Quiescence
-    fig = figure('Position', [50, 50, 1400, 900], 'Color', 'w');
-    t = tiledlayout(2, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
-
-    plot_configs = {
-        {'Vehicle', 'Moving',     1, 'Vehicle - Moving'}, ...
-        {'CNO',     'Moving',     2, 'CNO - Moving'}, ...
-        {'Vehicle', 'Quiescence', 3, 'Vehicle - Quiescence'}, ...
-        {'CNO',     'Quiescence', 4, 'CNO - Quiescence'}
-    };
-
-    colors_pre = [0.5 0.5 0.5];
-    colors_post_veh = [0 0.4470 0.7410];
-    colors_post_cno = [0.8500 0.3250 0.0980];
-
-    for plt_idx = 1:length(plot_configs)
-        cfg = plot_configs{plt_idx};
-        cond = cfg{1};
-        state = cfg{2};
-        tile_idx = cfg{3};
-        plot_title = cfg{4};
-
-        ax = nexttile(t, tile_idx);
-        hold(ax, 'on');
-
-        % Get data
-        psd_pre = data_store.(cond).Pre.(state);
-        psd_post = data_store.(cond).Post.(state);
-
-        % Plot Pre
-        if ~isempty(psd_pre)
-            mean_pre = mean(psd_pre, 1, 'omitnan');
-            mean_pre_norm = normalize_1f(mean_pre, freq);
-            plot(freq, mean_pre_norm, 'Color', colors_pre, 'LineWidth', 2, ...
-                'DisplayName', sprintf('Pre (n=%d)', size(psd_pre,1)));
-        end
-
-        % Plot Post
-        if ~isempty(psd_post)
-            mean_post = mean(psd_post, 1, 'omitnan');
-            mean_post_norm = normalize_1f(mean_post, freq);
-
-            col = strcmp(cond, 'Vehicle') * colors_post_veh + ...
-                  strcmp(cond, 'CNO') * colors_post_cno;
-
-            plot(freq, mean_post_norm, 'Color', col, 'LineWidth', 2.5, ...
-                'DisplayName', sprintf('Post (n=%d)', size(psd_post,1)));
-        end
-
-        set(ax, 'XScale', 'log', 'YScale', 'log');
-        xlim([1 300]);
-        xlabel('Frequency (Hz)');
-        ylabel('Power × f (\muV^2)');
-        title(plot_title, 'FontSize', 12, 'FontWeight', 'bold');
-        grid on;
-
-        % Mark frequency bands
-        xline(8, '--k', 'Alpha', 0.3, 'HandleVisibility', 'off'); % Theta
-        xline(150, ':k', 'Alpha', 0.3, 'HandleVisibility', 'off'); % Ripple
-
-        legend('Location', 'best', 'FontSize', 9);
-    end
-
-    sgtitle('Power Spectral Density (1/f Normalized): CNO vs Vehicle × Behavioral State', ...
-        'FontSize', 16, 'FontWeight', 'bold');
-
-    fprintf('✓ Main plot complete\n');
-
-    %% --- DIRECT COMPARISON PLOTS ---
-    % CNO vs Vehicle effect in Moving
-    fig2 = figure('Position', [100, 100, 1200, 500], 'Color', 'w');
-    t2 = tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
-
-    % Moving comparison
-    ax1 = nexttile(t2, 1);
-    hold(ax1, 'on');
-
-    % CNO Moving: Post/Pre ratio
-    psd_cno_pre_moving = data_store.CNO.Pre.Moving;
-    psd_cno_post_moving = data_store.CNO.Post.Moving;
-
-    if ~isempty(psd_cno_pre_moving) && ~isempty(psd_cno_post_moving)
-        mean_cno_pre = normalize_1f(mean(psd_cno_pre_moving, 1, 'omitnan'), freq);
-        mean_cno_post = normalize_1f(mean(psd_cno_post_moving, 1, 'omitnan'), freq);
-        plot(freq, mean_cno_post ./ mean_cno_pre, 'Color', colors_post_cno, ...
-            'LineWidth', 2.5, 'DisplayName', 'CNO');
-    end
-
-    % Vehicle Moving: Post/Pre ratio
-    psd_veh_pre_moving = data_store.Vehicle.Pre.Moving;
-    psd_veh_post_moving = data_store.Vehicle.Post.Moving;
-
-    if ~isempty(psd_veh_pre_moving) && ~isempty(psd_veh_post_moving)
-        mean_veh_pre = normalize_1f(mean(psd_veh_pre_moving, 1, 'omitnan'), freq);
-        mean_veh_post = normalize_1f(mean(psd_veh_post_moving, 1, 'omitnan'), freq);
-        plot(freq, mean_veh_post ./ mean_veh_pre, 'Color', colors_post_veh, ...
-            'LineWidth', 2.5, 'DisplayName', 'Vehicle');
-    end
-
-    yline(1, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
-    set(ax1, 'XScale', 'log');
-    xlim([1 300]);
-    xlabel('Frequency (Hz)');
-    ylabel('Post/Pre Ratio');
-    title('Moving State: CNO vs Vehicle Effect', 'FontSize', 12, 'FontWeight', 'bold');
-    grid on;
-    legend('Location', 'best');
-
-    % Quiescence comparison
-    ax2 = nexttile(t2, 2);
-    hold(ax2, 'on');
-
-    % CNO Quiescence
-    psd_cno_pre_quiesc = data_store.CNO.Pre.Quiescence;
-    psd_cno_post_quiesc = data_store.CNO.Post.Quiescence;
-
-    if ~isempty(psd_cno_pre_quiesc) && ~isempty(psd_cno_post_quiesc)
-        mean_cno_pre_q = normalize_1f(mean(psd_cno_pre_quiesc, 1, 'omitnan'), freq);
-        mean_cno_post_q = normalize_1f(mean(psd_cno_post_quiesc, 1, 'omitnan'), freq);
-        plot(freq, mean_cno_post_q ./ mean_cno_pre_q, 'Color', colors_post_cno, ...
-            'LineWidth', 2.5, 'DisplayName', 'CNO');
-    end
-
-    % Vehicle Quiescence
-    psd_veh_pre_quiesc = data_store.Vehicle.Pre.Quiescence;
-    psd_veh_post_quiesc = data_store.Vehicle.Post.Quiescence;
-
-    if ~isempty(psd_veh_pre_quiesc) && ~isempty(psd_veh_post_quiesc)
-        mean_veh_pre_q = normalize_1f(mean(psd_veh_pre_quiesc, 1, 'omitnan'), freq);
-        mean_veh_post_q = normalize_1f(mean(psd_veh_post_quiesc, 1, 'omitnan'), freq);
-        plot(freq, mean_veh_post_q ./ mean_veh_pre_q, 'Color', colors_post_veh, ...
-            'LineWidth', 2.5, 'DisplayName', 'Vehicle');
-    end
-
-    yline(1, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
-    set(ax2, 'XScale', 'log');
-    xlim([1 300]);
-    xlabel('Frequency (Hz)');
-    ylabel('Post/Pre Ratio');
-    title('Quiescence: CNO vs Vehicle Effect', 'FontSize', 12, 'FontWeight', 'bold');
-    grid on;
-    legend('Location', 'best');
-
-    sgtitle('Drug Effect Comparison (Post/Pre Ratio)', 'FontSize', 16, 'FontWeight', 'bold');
-
-    fprintf('✓ Comparison plot complete\n');
-
-    %% --- SAVE ---
-    save('PSD_Data_Store.mat', 'data_store', 'freq', 'fail_log', '-v7.3');
-    fprintf('✓ Saved results\n');
-end
-
+%% --- 4. RESULTS ---
 fprintf('\n============================================================\n');
-fprintf('ANALYSIS COMPLETE\n');
+fprintf('COMPLETE: %d/%d sessions (%.1f%%)\n', success_count, n_sessions, 100*success_count/n_sessions);
 fprintf('============================================================\n');
 
-%% PLOT WITHIN-SESSION PRE-POST DIFFERENCES
-clc; clear; close all;
-
-fprintf('Loading saved PSD data...\n');
-load('PSD_Data_Store.mat', 'data_store', 'freq');
-fprintf('Done\n\n');
-
-%% Compute within-session differences
-fprintf('Computing within-session differences...\n');
-
-conditions = {'CNO', 'Vehicle'};
-states = {'Moving', 'Quiescence'};
-session_diffs = struct();
-
-for c = 1:length(conditions)
-    cond = conditions{c};
-    for s = 1:length(states)
-        state = states{s};
-        
-        psd_pre = data_store.(cond).Pre.(state);
-        psd_post = data_store.(cond).Post.(state);
-        
-        n = min(size(psd_pre, 1), size(psd_post, 1));
-        
-        % Within-session: Post - Pre in dB
-        session_diffs.(cond).(state) = zeros(n, length(freq));
-        for sess = 1:n
-            session_diffs.(cond).(state)(sess, :) = ...
-                10*log10(psd_post(sess, :)) - 10*log10(psd_pre(sess, :));
-        end
-        
-        fprintf('%s %s: %d sessions\n', cond, state, n);
-    end
+% Check frequency resolution
+if exist('freq', 'var')
+    fprintf('Freq resolution: %.2f Hz\n', freq(2)-freq(1));
+    fprintf('Freq range: %.1f - %.1f Hz\n', min(freq), max(freq));
 end
 
-fprintf('Done\n\n');
+%% --- 5. SAVE ---
+if success_count > 0
+    save('PSD_Data_Store_1Hz_STRINGENT.mat', 'data_store', 'freq', 'fail_log', '-v7.3');
+    fprintf('Saved: PSD_Data_Store_1Hz_STRINGENT.mat\n');
+end
 
-%% Colors
-colors_post_veh = [0 0.4470 0.7410];
-colors_post_cno = [0.8500 0.3250 0.0980];
+%% plot PSD
 
-%% FIGURE 1: By state
-fprintf('Generating plots...\n');
+%% PLOT PSD - Log Scale with SEM bands
+clc; close all;
 
-fig1 = figure('Position', [100, 100, 1200, 500], 'Color', 'w');
-t1 = tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
+load('PSD_Data_Store_1Hz.mat', 'data_store', 'freq');
 
-% Moving
-ax1 = nexttile(t1, 1);
-hold on;
+% Colors
+cno_color = [0.85 0.33 0.10];   % Red/orange
+veh_color = [0 0.45 0.74];      % Blue
 
-mean_cno = mean(session_diffs.CNO.Moving, 1, 'omitnan');
-mean_veh = mean(session_diffs.Vehicle.Moving, 1, 'omitnan');
-
-plot(freq, mean_cno, 'Color', colors_post_cno, 'LineWidth', 2.5, ...
-    'DisplayName', sprintf('CNO (n=%d)', size(session_diffs.CNO.Moving, 1)));
-plot(freq, mean_veh, 'Color', colors_post_veh, 'LineWidth', 2.5, ...
-    'DisplayName', sprintf('Vehicle (n=%d)', size(session_diffs.Vehicle.Moving, 1)));
-
-yline(0, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
-xlim([0 300]);
-ylim([-4 2]);
-xlabel('Frequency (Hz)');
-ylabel('Power Change (dB)');
-title('Moving State');
-grid on;
-legend('Location', 'best');
+%% Compute within-session differences (Post - Pre in dB)
+% Match session counts and compute paired difference
 
 % Quiescence
-ax2 = nexttile(t1, 2);
+cno_pre_q = data_store.CNO.Pre.Quiescence;
+cno_post_q = data_store.CNO.Post.Quiescence;
+nCNO_q = min(size(cno_pre_q,1), size(cno_post_q,1));
+cno_diff_q = 10*log10(cno_post_q(1:nCNO_q,:)) - 10*log10(cno_pre_q(1:nCNO_q,:));
+
+veh_pre_q = data_store.Vehicle.Pre.Quiescence;
+veh_post_q = data_store.Vehicle.Post.Quiescence;
+nVeh_q = min(size(veh_pre_q,1), size(veh_post_q,1));
+veh_diff_q = 10*log10(veh_post_q(1:nVeh_q,:)) - 10*log10(veh_pre_q(1:nVeh_q,:));
+
+% Moving
+cno_pre_m = data_store.CNO.Pre.Moving;
+cno_post_m = data_store.CNO.Post.Moving;
+nCNO_m = min(size(cno_pre_m,1), size(cno_post_m,1));
+cno_diff_m = 10*log10(cno_post_m(1:nCNO_m,:)) - 10*log10(cno_pre_m(1:nCNO_m,:));
+
+veh_pre_m = data_store.Vehicle.Pre.Moving;
+veh_post_m = data_store.Vehicle.Post.Moving;
+nVeh_m = min(size(veh_pre_m,1), size(veh_post_m,1));
+veh_diff_m = 10*log10(veh_post_m(1:nVeh_m,:)) - 10*log10(veh_pre_m(1:nVeh_m,:));
+
+% All states combined
+cno_diff_all = [cno_diff_q; cno_diff_m];
+veh_diff_all = [veh_diff_q; veh_diff_m];
+
+%% Helper function for mean and SEM
+calc_stats = @(x) deal(mean(x, 1, 'omitnan')', (std(x, 0, 1, 'omitnan') / sqrt(size(x,1)))');
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% PLOT PSD - Log Scale with SEM bands (3 panels)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clc; clear; close all;
+
+load('PSD_Data_Store_1Hz_STRINGENT.mat', 'data_store', 'freq');
+
+% Colors
+cno_color = [0.85 0.33 0.10];
+veh_color = [0 0.45 0.74];
+
+%% Compute within-session differences (Post - Pre in dB)
+
+% Quiescence
+cno_pre_q = data_store.CNO.Pre.Quiescence;
+cno_post_q = data_store.CNO.Post.Quiescence;
+nCNO_q = min(size(cno_pre_q,1), size(cno_post_q,1));
+cno_diff_q = 10*log10(cno_post_q(1:nCNO_q,:)) - 10*log10(cno_pre_q(1:nCNO_q,:));
+
+veh_pre_q = data_store.Vehicle.Pre.Quiescence;
+veh_post_q = data_store.Vehicle.Post.Quiescence;
+nVeh_q = min(size(veh_pre_q,1), size(veh_post_q,1));
+veh_diff_q = 10*log10(veh_post_q(1:nVeh_q,:)) - 10*log10(veh_pre_q(1:nVeh_q,:));
+
+% Moving
+cno_pre_m = data_store.CNO.Pre.Moving;
+cno_post_m = data_store.CNO.Post.Moving;
+nCNO_m = min(size(cno_pre_m,1), size(cno_post_m,1));
+cno_diff_m = 10*log10(cno_post_m(1:nCNO_m,:)) - 10*log10(cno_pre_m(1:nCNO_m,:));
+
+veh_pre_m = data_store.Vehicle.Pre.Moving;
+veh_post_m = data_store.Vehicle.Post.Moving;
+nVeh_m = min(size(veh_pre_m,1), size(veh_post_m,1));
+veh_diff_m = 10*log10(veh_post_m(1:nVeh_m,:)) - 10*log10(veh_pre_m(1:nVeh_m,:));
+
+% All states combined
+cno_diff_all = [cno_diff_q; cno_diff_m];
+veh_diff_all = [veh_diff_q; veh_diff_m];
+
+%% Helper function to interpolate over artifacts
+interpolate_artifacts = @(data, f, artifact_idx) interp1(f(~artifact_idx), data(~artifact_idx), f, 'linear');
+
+%% Create figure - 3 panels
+figure('Position', [50 100 1600 450], 'Color', 'w');
+
+freq_vec = freq(:);
+freq_start = find(freq_vec >= 1, 1, 'first');
+f = freq_vec(freq_start:end);
+
+% Define artifact frequencies (60 Hz and harmonics)
+artifact_idx = (f >= 58 & f <= 62) | (f >= 118 & f <= 122) | (f >= 178 & f <= 182);
+
+% ===== PANEL 1: QUIESCENCE =====
+subplot(1,3,1);
 hold on;
 
-mean_cno = mean(session_diffs.CNO.Quiescence, 1, 'omitnan');
-mean_veh = mean(session_diffs.Vehicle.Quiescence, 1, 'omitnan');
+cno_mean = mean(cno_diff_q, 1, 'omitnan')';
+cno_sem = (std(cno_diff_q, 0, 1, 'omitnan') / sqrt(size(cno_diff_q,1)))';
+veh_mean = mean(veh_diff_q, 1, 'omitnan')';
+veh_sem = (std(veh_diff_q, 0, 1, 'omitnan') / sqrt(size(veh_diff_q,1)))';
 
-plot(freq, mean_cno, 'Color', colors_post_cno, 'LineWidth', 2.5, ...
-    'DisplayName', sprintf('CNO (n=%d)', size(session_diffs.CNO.Quiescence, 1)));
-plot(freq, mean_veh, 'Color', colors_post_veh, 'LineWidth', 2.5, ...
-    'DisplayName', sprintf('Vehicle (n=%d)', size(session_diffs.Vehicle.Quiescence, 1)));
+cno_m = cno_mean(freq_start:end);
+cno_s = cno_sem(freq_start:end);
+veh_m = veh_mean(freq_start:end);
+veh_s = veh_sem(freq_start:end);
 
-yline(0, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
+% Interpolate over artifacts
+cno_m = interpolate_artifacts(cno_m, f, artifact_idx);
+cno_s = interpolate_artifacts(cno_s, f, artifact_idx);
+veh_m = interpolate_artifacts(veh_m, f, artifact_idx);
+veh_s = interpolate_artifacts(veh_s, f, artifact_idx);
+
+fill([f; flipud(f)], [cno_m+cno_s; flipud(cno_m-cno_s)], ...
+    cno_color, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+fill([f; flipud(f)], [veh_m+veh_s; flipud(veh_m-veh_s)], ...
+    veh_color, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+
+h1 = plot(f, cno_m, 'Color', cno_color, 'LineWidth', 2);
+h2 = plot(f, veh_m, 'Color', veh_color, 'LineWidth', 2);
+
+yline(0, '--', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');
+
+set(gca, 'XScale', 'log');
 xlim([0 300]);
+xticks([1 4 12 30 80 150 300]);
 ylim([-4 2]);
 xlabel('Frequency (Hz)');
-ylabel('Power Change (dB)');
+ylabel('Spectral Power Change (dB)');
 title('Quiescence');
-grid on;
-legend('Location', 'best');
+legend([h1 h2], {sprintf('CNO (n=%d)', nCNO_q), sprintf('Vehicle (n=%d)', nVeh_q)}, ...
+    'Location', 'northeast');
+box off;
+set(gca, 'FontSize', 11);
 
-sgtitle('Within-Session Post-Pre Change: CNO vs Vehicle', 'FontSize', 16);
+text(7, 1.8, '\theta', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(20, 1.8, '\beta', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(50, 1.8, 'L\gamma', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(100, 1.8, 'H\gamma', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(200, 1.8, 'Ripple', 'FontSize', 10,  'HorizontalAlignment', 'center');
 
-%% FIGURE 2: All behaviors combined
-fig2 = figure('Position', [150, 150, 1200, 500], 'Color', 'w');
-t2 = tiledlayout(1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
-
-% CNO all
-ax1 = nexttile(t2, 1);
+% ===== PANEL 2: MOVING =====
+subplot(1,3,2);
 hold on;
 
-all_cno = [session_diffs.CNO.Moving; session_diffs.CNO.Quiescence];
-mean_cno_all = mean(all_cno, 1, 'omitnan');
+cno_mean = mean(cno_diff_m, 1, 'omitnan')';
+cno_sem = (std(cno_diff_m, 0, 1, 'omitnan') / sqrt(size(cno_diff_m,1)))';
+veh_mean = mean(veh_diff_m, 1, 'omitnan')';
+veh_sem = (std(veh_diff_m, 0, 1, 'omitnan') / sqrt(size(veh_diff_m,1)))';
 
-plot(freq, mean_cno_all, 'Color', colors_post_cno, 'LineWidth', 3, ...
-    'DisplayName', sprintf('CNO (n=%d)', size(all_cno, 1)));
+cno_m = cno_mean(freq_start:end);
+cno_s = cno_sem(freq_start:end);
+veh_m = veh_mean(freq_start:end);
+veh_s = veh_sem(freq_start:end);
 
-yline(0, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
+% Interpolate over artifacts
+cno_m = interpolate_artifacts(cno_m, f, artifact_idx);
+cno_s = interpolate_artifacts(cno_s, f, artifact_idx);
+veh_m = interpolate_artifacts(veh_m, f, artifact_idx);
+veh_s = interpolate_artifacts(veh_s, f, artifact_idx);
+
+fill([f; flipud(f)], [cno_m+cno_s; flipud(cno_m-cno_s)], ...
+    cno_color, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+fill([f; flipud(f)], [veh_m+veh_s; flipud(veh_m-veh_s)], ...
+    veh_color, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+
+h1 = plot(f, cno_m, 'Color', cno_color, 'LineWidth', 2);
+h2 = plot(f, veh_m, 'Color', veh_color, 'LineWidth', 2);
+
+yline(0, '--', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');
+
+set(gca, 'XScale', 'log');
 xlim([0 300]);
+xticks([1 4 12 30 80 150 300]);
 ylim([-4 2]);
 xlabel('Frequency (Hz)');
-ylabel('Power Change (dB)');
-title('CNO - All Behaviors');
-grid on;
-legend('Location', 'best');
+ylabel('Spectral Power Change (dB)');
+title('Moving');
+legend([h1 h2], {sprintf('CNO (n=%d)', nCNO_m), sprintf('Vehicle (n=%d)', nVeh_m)}, ...
+    'Location', 'northeast');
+box off;
+set(gca, 'FontSize', 11);
+text(7, 1.8, '\theta', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(20, 1.8, '\beta', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(50, 1.8, 'L\gamma', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(100, 1.8, 'H\gamma', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(200, 1.8, 'Ripple', 'FontSize', 10,  'HorizontalAlignment', 'center');
 
-% Vehicle all
-ax2 = nexttile(t2, 2);
+% ===== PANEL 3: ALL STATES =====
+subplot(1,3,3);
 hold on;
 
-all_veh = [session_diffs.Vehicle.Moving; session_diffs.Vehicle.Quiescence];
-mean_veh_all = mean(all_veh, 1, 'omitnan');
+cno_mean = mean(cno_diff_all, 1, 'omitnan')';
+cno_sem = (std(cno_diff_all, 0, 1, 'omitnan') / sqrt(size(cno_diff_all,1)))';
+veh_mean = mean(veh_diff_all, 1, 'omitnan')';
+veh_sem = (std(veh_diff_all, 0, 1, 'omitnan') / sqrt(size(veh_diff_all,1)))';
 
-plot(freq, mean_veh_all, 'Color', colors_post_veh, 'LineWidth', 3, ...
-    'DisplayName', sprintf('Vehicle (n=%d)', size(all_veh, 1)));
+cno_m = cno_mean(freq_start:end);
+cno_s = cno_sem(freq_start:end);
+veh_m = veh_mean(freq_start:end);
+veh_s = veh_sem(freq_start:end);
 
-yline(0, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
+% Interpolate over artifacts
+cno_m = interpolate_artifacts(cno_m, f, artifact_idx);
+cno_s = interpolate_artifacts(cno_s, f, artifact_idx);
+veh_m = interpolate_artifacts(veh_m, f, artifact_idx);
+veh_s = interpolate_artifacts(veh_s, f, artifact_idx);
+
+fill([f; flipud(f)], [cno_m+cno_s; flipud(cno_m-cno_s)], ...
+    cno_color, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+fill([f; flipud(f)], [veh_m+veh_s; flipud(veh_m-veh_s)], ...
+    veh_color, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+
+h1 = plot(f, cno_m, 'Color', cno_color, 'LineWidth', 2);
+h2 = plot(f, veh_m, 'Color', veh_color, 'LineWidth', 2);
+
+yline(0, '--', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');
+
+set(gca, 'XScale', 'log');
 xlim([0 300]);
+xticks([1 4 12 30 80 150 300]);
 ylim([-4 2]);
 xlabel('Frequency (Hz)');
-ylabel('Power Change (dB)');
-title('Vehicle - All Behaviors');
-grid on;
-legend('Location', 'best');
+ylabel('Spectral Power Change (dB)');
+title('All States');
+legend([h1 h2], {sprintf('CNO (n=%d)', size(cno_diff_all,1)), ...
+                 sprintf('Vehicle (n=%d)', size(veh_diff_all,1))}, ...
+    'Location', 'northeast');
+box off;
+set(gca, 'FontSize', 11);
+text(7, 1.8, '\theta', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(20, 1.8, '\beta', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(50, 1.8, 'L\gamma', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(100, 1.8, 'H\gamma', 'FontSize', 12, 'HorizontalAlignment', 'center');
+text(200, 1.8, 'Ripple', 'FontSize', 10,  'HorizontalAlignment', 'center');
 
-sgtitle('Within-Session Post-Pre Change: All Behaviors', 'FontSize', 16);
-
-%% FIGURE 3: CNO vs Vehicle - All behaviours on same plot
-fig3 = figure('Position', [200, 200, 800, 600], 'Color', 'w');
-hold on;
-
-all_cno = [session_diffs.CNO.Moving; session_diffs.CNO.Quiescence];
-mean_cno_all = mean(all_cno, 1, 'omitnan');
-
-all_veh = [session_diffs.Vehicle.Moving; session_diffs.Vehicle.Quiescence];
-mean_veh_all = mean(all_veh, 1, 'omitnan');
-
-plot(freq, mean_cno_all, 'Color', colors_post_cno, 'LineWidth', 3, ...
-    'DisplayName', sprintf('CNO (n=%d)', size(all_cno, 1)));
-plot(freq, mean_veh_all, 'Color', colors_post_veh, 'LineWidth', 3, ...
-    'DisplayName', sprintf('Vehicle (n=%d)', size(all_veh, 1)));
-
-yline(0, '--k', 'Alpha', 0.5, 'HandleVisibility', 'off');
-xlim([0 300]);
-ylim([-4 2]);
-xlabel('Frequency (Hz)', 'FontSize', 12);
-ylabel('Spectral Power Change (dB)', 'FontSize', 12);
-title('CNO vs Vehicle - All Behavioral States Combined', 'FontSize', 14, 'FontWeight', 'bold');
-grid on;
-legend('Location', 'best', 'FontSize', 11);
-
-fprintf('Done!\n');
-fprintf('Vehicle should now be near 0 dB (no change)\n');
+sgtitle('Power Spectral Density Change (Post [0-1 Hour] - Pre-Injection Baseline)', 'FontSize', 14, 'FontWeight', 'bold');
