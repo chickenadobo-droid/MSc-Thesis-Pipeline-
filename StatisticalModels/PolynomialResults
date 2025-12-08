@@ -589,3 +589,157 @@ function plot_metric_panel(T_clean, trend_results, state_field, metric_var, ...
     box on;
     hold off;
 end
+
+
+%% ripple powe ronly for thesis visualisation
+
+%% Ripple Power & Events Recovery (Quiescence) - TWO PANELS
+clc; clear; close all;
+
+%% Load data
+table_path = 'C:\Users\abbim\OneDrive - University College London\Documents\MSc\ResearchProject\MATLAB\TetrodeAnalysis';
+output_path = fullfile(table_path, 'FinalAnalysis_Clean_Trend');
+
+load(fullfile(table_path, 'Final_Table_for_GLM_cleanMUA_NewZ.mat'), 'Final_GLM_Table');
+load(fullfile(output_path, 'TrendAnalysis_Results.mat'), 'trend_results');
+
+%% ==================== FULL DATA CLEANING (from original) ====================
+
+% Remove missing locations
+T = Final_GLM_Table(~ismissing(Final_GLM_Table.Location), :);
+
+% % Remove Extreme MUA Sessions
+% unique_sessions_all = unique(T.SessionName);
+% session_stats = table();
+% for s = 1:length(unique_sessions_all)
+%     session = unique_sessions_all{s};
+%     session_mask = strcmp(T.SessionName, session);
+%     post_inj_mask = session_mask & T.time_min >= 0;
+%     mua_post = T.MUA_mean_Hz_replicated(post_inj_mask);
+%     session_stats = [session_stats; table({char(session)}, mean(mua_post, 'omitnan'), ...
+%         'VariableNames', {'SessionName', 'MUA_Post_Mean'})];
+% end
+% median_mua = median(session_stats.MUA_Post_Mean);
+% mad_val = median(abs(session_stats.MUA_Post_Mean - median_mua));
+% outlier_mask = abs(session_stats.MUA_Post_Mean - median_mua) > 2.5*mad_val;
+% outlier_sessions = session_stats.SessionName(outlier_mask);
+% T = T(~ismember(T.SessionName, outlier_sessions), :);
+
+% Remove Contaminated Sessions
+contaminated_sessions = {
+    'mouseB6_CNO_Day2_Sleep_11_26_2012';
+    'mouseD12_050213_Day6_PBS';
+    'mouseD12_050913_Day7_CNO'
+};
+T = T(~ismember(T.SessionName, contaminated_sessions), :);
+
+% Limit to ≤360 minutes
+T_clean = T(T.time_min <= 400, :);
+
+clear T Final_GLM_Table;
+
+%% Z-score ripple power to baseline
+raw_ripple_col = 'ripple_power_mean';
+unique_sessions = unique(T_clean.SessionName);
+T_clean.Ripple_Z_Baseline = NaN(height(T_clean), 1);
+
+for s = 1:length(unique_sessions)
+    session = unique_sessions{s};
+    session_mask = strcmp(T_clean.SessionName, session);
+    pre_inj_mask = session_mask & T_clean.time_min < 0;
+    
+    if sum(pre_inj_mask) > 0
+        pre_data = T_clean.(raw_ripple_col)(pre_inj_mask);
+        mean_val = mean(pre_data, 'omitnan');
+        std_val = std(pre_data, 'omitnan');
+        if std_val > 0
+            T_clean.Ripple_Z_Baseline(session_mask) = (T_clean.(raw_ripple_col)(session_mask) - mean_val) / std_val;
+        end
+    end
+end
+
+%% Define quiescent state
+quiescent_states = {'Still', 'Sleep'};
+state_mask = ismember(T_clean.BehaviouralState, quiescent_states);
+
+%% Colors
+color_cno = [0.8500, 0.3250, 0.0980];
+color_veh = [0, 0.4470, 0.7410];
+
+%% Create figure
+figure('Position', [100, 100, 1000, 450], 'Color', 'w');
+
+%% ==================== PANEL 1: RIPPLE POWER ====================
+subplot(1, 1, 1);
+hold on;
+
+metric_var = 'Ripple_Z_Baseline';
+
+data_subset = T_clean(state_mask & T_clean.time_min >= 0 & ~isnan(T_clean.(metric_var)), :);
+cno_data = data_subset(data_subset.Condition == 'CNO', :);
+veh_data = data_subset(data_subset.Condition == 'Vehicle', :);
+
+% Scatter points
+scatter(veh_data.time_min, veh_data.(metric_var), 40, color_veh, 'filled', 'MarkerFaceAlpha', 0.3, 'HandleVisibility', 'off');
+scatter(cno_data.time_min, cno_data.(metric_var), 40, color_cno, 'filled', 'MarkerFaceAlpha', 0.3, 'HandleVisibility', 'off');
+
+% Moving averages
+[veh_ma_time, veh_ma_vals] = calculate_moving_average(veh_data.time_min, veh_data.(metric_var), 30);
+[cno_ma_time, cno_ma_vals] = calculate_moving_average(cno_data.time_min, cno_data.(metric_var), 30);
+plot(veh_ma_time, veh_ma_vals, ':', 'Color', color_veh, 'LineWidth', 3, 'DisplayName', 'Vehicle (mean)');
+plot(cno_ma_time, cno_ma_vals, ':', 'Color', color_cno, 'LineWidth', 3, 'DisplayName', 'CNO (mean)');
+
+% GLME model fit
+if isfield(trend_results, 'Quiescent_Still_Sleep') && isfield(trend_results.Quiescent_Still_Sleep, metric_var)
+    glme = trend_results.Quiescent_Still_Sleep.(metric_var).model;
+    time_pred = linspace(0, max(data_subset.time_min), 500)';
+    
+    pred_table_veh = table();
+    pred_table_veh.time_min = time_pred;
+    pred_table_veh.time_min_sq = time_pred.^2;
+    pred_table_veh.time_min_cub = time_pred.^3;
+    pred_table_veh.Condition = repmat(categorical({'Vehicle'}, {'Vehicle', 'CNO'}), length(time_pred), 1);
+    pred_table_veh.AnimalID = repmat(data_subset.AnimalID(1), length(time_pred), 1);
+    pred_table_veh.SessionName = repmat(data_subset.SessionName(1), length(time_pred), 1);
+    
+    pred_table_cno = pred_table_veh;
+    pred_table_cno.Condition = repmat(categorical({'CNO'}, {'Vehicle', 'CNO'}), length(time_pred), 1);
+    
+    [pred_veh, pred_veh_ci] = predict(glme, pred_table_veh, 'Conditional', false, 'Alpha', 0.05);
+    [pred_cno, pred_cno_ci] = predict(glme, pred_table_cno, 'Conditional', false, 'Alpha', 0.05);
+    
+    % Shaded CI
+    fill([time_pred; flipud(time_pred)], [pred_veh_ci(:,1); flipud(pred_veh_ci(:,2))], ...
+        color_veh, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+    fill([time_pred; flipud(time_pred)], [pred_cno_ci(:,1); flipud(pred_cno_ci(:,2))], ...
+        color_cno, 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+    
+    % Model lines
+    plot(time_pred, pred_veh, '-', 'Color', color_veh, 'LineWidth', 2, 'DisplayName', 'Vehicle (model)');
+    plot(time_pred, pred_cno, '-', 'Color', color_cno, 'LineWidth', 2, 'DisplayName', 'CNO (model)');
+end
+
+xlabel('Time from Injection (min)', 'FontSize', 12);
+ylabel('Ripple Power (Z-Scored)', 'FontSize', 12);
+title('Ripple Power', 'FontSize', 14, 'FontWeight', 'bold');
+legend('Location', 'best', 'FontSize', 9);
+xlim([0 400]);
+box off;
+set(gca, 'TickDir', 'out', 'FontSize', 11);
+
+%% Overall title
+sgtitle('Ripple Recovery During Quiescence', 'FontSize', 16, 'FontWeight', 'bold');
+
+%% Helper function
+function [ma_time, ma_vals] = calculate_moving_average(data_time, data_vals, window_size)
+    data_sorted = sortrows([data_time, data_vals], 1);
+    ma_time = [];
+    ma_vals = [];
+    for t = 0:2:400
+        window_mask = data_sorted(:,1) >= t & data_sorted(:,1) < (t + window_size);
+        if sum(window_mask) >= 5
+            ma_time(end+1) = t + window_size/2;
+            ma_vals(end+1) = mean(data_sorted(window_mask, 2), 'omitnan');
+        end
+    end
+end
